@@ -15,14 +15,16 @@ class OrthophotoMap:
     The "local" coordinate system is offset so that the map center is at (0, 0).
     """
 
-    def __init__(self, geotiff_path: str):
+    def __init__(self, geotiff_path: str, elevation_path: str = None):
         """
         Load a GeoTIFF and prepare coordinate transforms.
 
         Args:
             geotiff_path: Path to GeoTIFF file (expected EPSG:3857).
+            elevation_path: Path to Elevation GeoTIFF file.
         """
         self.path = geotiff_path
+        self.elevation_path = elevation_path
 
         with rasterio.open(geotiff_path) as src:
             # Read as (bands, H, W), then transpose to (H, W, bands) for OpenCV
@@ -57,9 +59,26 @@ class OrthophotoMap:
         self.res_x = abs(self._transform.a)  # meters/pixel in X
         self.res_y = abs(self._transform.e)  # meters/pixel in Y (negative in affine)
 
+        self.elevation = None
+        self.base_elevation = 0.0
+        
+        if self.elevation_path:
+            with rasterio.open(self.elevation_path) as src_elev:
+                # Read RGB bands
+                elev_data = src_elev.read()
+                R = elev_data[0].astype(np.float32)
+                G = elev_data[1].astype(np.float32)
+                B = elev_data[2].astype(np.float32)
+                
+                # AWS Terrarium formula
+                self.elevation = (R * 256.0 + G + B / 256.0) - 32768.0
+                self.base_elevation = np.min(self.elevation)
+
         print(f"[OrthophotoMap] Loaded: {self.image.shape[1]}x{self.image.shape[0]} px, "
               f"resolution: {self.res_x:.3f} m/px")
         print(f"[OrthophotoMap] Center (WM): ({self._center_x:.1f}, {self._center_y:.1f})")
+        if self.elevation is not None:
+            print(f"[OrthophotoMap] Elevation loaded. Min: {np.min(self.elevation):.1f}m, Max: {np.max(self.elevation):.1f}m")
 
     @property
     def height(self) -> int:

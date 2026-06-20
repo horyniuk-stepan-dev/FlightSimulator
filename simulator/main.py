@@ -33,16 +33,28 @@ def parse_args() -> SimulatorConfig:
 
     # Bounding box
     parser.add_argument(
-        "--lat-min", type=float, default=47.81778199390838, help="Min Latitude (WGS84)"
+        "--lat_min",
+        type=float,
+        default=48.364964,
+        help="Minimum latitude (South)",
     )
     parser.add_argument(
-        "--lon-min", type=float, default=34.922599133780636, help="Min Longitude (WGS84)"
+        "--lon_min",
+        type=float,
+        default=26.062876,
+        help="Minimum longitude (West)",
     )
     parser.add_argument(
-        "--lat-max", type=float, default=47.83464232085366, help="Max Latitude (WGS84)"
+        "--lat_max",
+        type=float,
+        default=48.402230,
+        help="Maximum latitude (North)",
     )
     parser.add_argument(
-        "--lon-max", type=float, default=34.94308924682522, help="Max Longitude (WGS84)"
+        "--lon_max",
+        type=float,
+        default=26.116208,
+        help="Maximum longitude (East)",
     )
     parser.add_argument("--zoom", type=int, default=17, help="Map tile zoom level")
 
@@ -115,22 +127,32 @@ def main():
     print("=== Drone Flight Simulator ===")
     cfg = parse_args()
 
-    # 1. Load Terrain
+    # 1. Setup Terrain
     if cfg.geotiff_path and Path(cfg.geotiff_path).exists():
+        print(f"Using provided GeoTIFF: {cfg.geotiff_path}")
         geotiff_path = cfg.geotiff_path
-        print(f"Using provided GeoTIFF: {geotiff_path}")
+        elevation_path = None
     else:
         print("Downloading tiles...")
+        from simulator.terrain.tile_loader import download_tiles, download_elevation
+
         geotiff_path = download_tiles(
-            cfg.lat_min,
-            cfg.lon_min,
-            cfg.lat_max,
-            cfg.lon_max,
+            lat_min=cfg.lat_min,
+            lon_min=cfg.lon_min,
+            lat_max=cfg.lat_max,
+            lon_max=cfg.lon_max,
             zoom=cfg.zoom,
-            cache_dir=cfg.cache_dir,
+        )
+        
+        elevation_path = download_elevation(
+            lat_min=cfg.lat_min,
+            lon_min=cfg.lon_min,
+            lat_max=cfg.lat_max,
+            lon_max=cfg.lon_max,
+            zoom=min(cfg.zoom, 15),  # Terrain tiles max out at zoom 15 on AWS
         )
 
-    ortho_map = OrthophotoMap(geotiff_path)
+    ortho_map = OrthophotoMap(geotiff_path, elevation_path=elevation_path)
     bounds = ortho_map.get_bounds_local()
     print(f"Map Bounds (local meters): {bounds}")
 

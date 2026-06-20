@@ -30,10 +30,15 @@ class CameraRenderer:
             self.use_gpu = True
             # Transfer image to GPU. Cast to float32 for interpolation.
             self.gpu_image = cp.asarray(self.ortho_map.image, dtype=cp.float32)
+            if self.ortho_map.elevation is not None:
+                self.gpu_elevation = cp.asarray(self.ortho_map.elevation, dtype=cp.float32)
+            else:
+                self.gpu_elevation = None
             print("[CameraRenderer] CuPy initialized. Rendering on GPU.")
         except ImportError:
             self.use_gpu = False
             self.gpu_image = None
+            self.gpu_elevation = None
             print("[CameraRenderer] CuPy not found. Falling back to CPU rendering.")
 
     def render(self, state: DroneState) -> np.ndarray:
@@ -131,6 +136,29 @@ class CameraRenderer:
             w_div = w_map + 1e-7
             u_map /= w_div
             v_map /= w_div
+            
+            # Parallax Displacement Mapping (3D Terrain)
+            if self.gpu_elevation is not None:
+                drone_col, drone_row = self.ortho_map.local_to_pixel(lx, ly)
+                
+                u_0 = u_map.copy()
+                v_0 = v_map.copy()
+                
+                # 3 passes for accurate ray intersection with the heightfield
+                for _ in range(3):
+                    coords = cp.stack([v_map, u_map], axis=0)
+                    h_abs = cupyx.scipy.ndimage.map_coordinates(
+                        self.gpu_elevation, coords, order=1, mode='nearest'
+                    )
+                    # Height above the Z=0 base plane
+                    h_rel = h_abs - self.ortho_map.base_elevation
+                    
+                    # Avoid division by zero
+                    frac = h_rel / max(altitude, 10.0)
+                    
+                    # Shift coordinates towards the drone
+                    u_map = u_0 - frac * (u_0 - drone_col)
+                    v_map = v_0 - frac * (v_0 - drone_row)
             
             coords = cp.stack([v_map, u_map], axis=0)
             

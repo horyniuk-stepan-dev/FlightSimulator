@@ -140,3 +140,73 @@ def download_tiles(
     print(f"[TileLoader] GeoTIFF saved: {output_path} ({file_size_mb:.1f} MB)")
 
     return output_path
+
+
+def download_elevation(
+    lat_min: float,
+    lon_min: float,
+    lat_max: float,
+    lon_max: float,
+    zoom: int = 14,
+    cache_dir: str = ".tile_cache",
+) -> str:
+    """
+    Download AWS Terrain elevation tiles for the given bounding box.
+    """
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+
+    # Generate cache filename
+    tile_hash = bbox_hash(lon_min, lat_min, lon_max, lat_max, zoom)
+    output_path = str(cache_path / f"elevation_{tile_hash}_z{zoom}.tif")
+
+    if os.path.exists(output_path):
+        print(f"[TileLoader] Using cached Elevation GeoTIFF: {output_path}")
+        return output_path
+
+    print(f"[TileLoader] Downloading Elevation tiles for bbox: "
+          f"({lat_min:.6f}, {lon_min:.6f}) -> ({lat_max:.6f}, {lon_max:.6f}), zoom={zoom}")
+
+    num_tiles = 0
+    try:
+        num_tiles = cx.howmany(lon_min, lat_min, lon_max, lat_max, zoom, ll=True)
+    except Exception:
+        pass
+
+    tracker = ProgressTracker(num_tiles)
+    
+    # Monkey-patch contextily to track progress
+    original_fetch_tile = getattr(cx.tile, '_fetch_tile', None)
+    if original_fetch_tile:
+        def patched_fetch_tile(*args, **kwargs):
+            res = original_fetch_tile(*args, **kwargs)
+            tracker.downloaded += 1
+            return res
+        cx.tile._fetch_tile = patched_fetch_tile
+
+    tracker.start()
+
+    # Custom provider for AWS Terrarium
+    # R * 256 + G + B / 256 - 32768
+    aws_terrarium = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+
+    try:
+        _ = cx.bounds2raster(
+            lon_min,      # west
+            lat_min,      # south
+            lon_max,      # east
+            lat_max,      # north
+            output_path,
+            zoom=zoom,
+            source=aws_terrarium,
+            ll=True,
+        )
+    finally:
+        tracker.stop()
+        if original_fetch_tile:
+            cx.tile._fetch_tile = original_fetch_tile
+
+    file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+    print(f"[TileLoader] Elevation GeoTIFF saved: {output_path} ({file_size_mb:.1f} MB)")
+
+    return output_path
