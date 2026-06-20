@@ -15,3 +15,4 @@ telemetry.csv
 # OS generated
 .DS_Store
 Thumbs.db
+simulator/allFiles/*
