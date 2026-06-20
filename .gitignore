@@ -1,0 +1,17 @@
+.tile_cache/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Project specific
+telemetry.csv
+
+# IDEs
+.vscode/
+.idea/
+
+# OS generated
+.DS_Store
+Thumbs.db
