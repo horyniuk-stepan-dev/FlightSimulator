@@ -19,6 +19,8 @@ class HUD:
         self.text_color = (0, 255, 0)      # Green text
         self.bg_color = (0, 0, 0)          # Black background
         self.bg_alpha = 0.5                # Semi-transparent background
+        self._frame_count = 0
+        self._last_gps = (0.0, 0.0)
 
     def render(
         self,
@@ -46,8 +48,11 @@ class HUD:
         Returns:
             Frame with HUD overlay.
         """
-        # Convert local position to GPS
-        lat, lon = self.ortho_map.local_to_gps(state.position[0], state.position[1])
+        # Convert local position to GPS (throttled to save pyproj overhead)
+        if self._frame_count % 10 == 0:
+            self._last_gps = self.ortho_map.local_to_gps(state.position[0], state.position[1])
+        self._frame_count += 1
+        lat, lon = self._last_gps
 
         # Prepare text lines
         lines = [
@@ -63,18 +68,16 @@ class HUD:
         if progress:
             lines.append(f"WP:   {progress}")
 
-        # Draw semi-transparent background for text
-        overlay = frame.copy()
-        
         # Calculate background box size based on longest text
         max_len = max(len(line) for line in lines)
         box_w = int(max_len * 12 * self.font_scale)
         box_h = int(len(lines) * 25 * self.font_scale) + 10
         
-        cv2.rectangle(overlay, (10, 10), (10 + box_w, 10 + box_h), self.bg_color, -1)
-        
-        # Apply alpha blending for the background
-        cv2.addWeighted(overlay, self.bg_alpha, frame, 1 - self.bg_alpha, 0, frame)
+        # Draw semi-transparent background for text (only on ROI, avoids full frame copy)
+        roi = frame[10:10+box_h, 10:10+box_w]
+        blk = np.empty_like(roi)
+        blk[:] = self.bg_color
+        cv2.addWeighted(roi, 1.0 - self.bg_alpha, blk, self.bg_alpha, 0, roi)
 
         # Draw text
         y = 30

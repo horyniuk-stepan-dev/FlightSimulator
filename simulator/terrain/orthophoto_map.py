@@ -2,6 +2,7 @@
 OrthophotoMap — wraps a GeoTIFF into a numpy array with geo-transform.
 Provides pixel ↔ world (Web Mercator meters) coordinate conversion.
 """
+import cv2
 import numpy as np
 import rasterio
 from pyproj import Transformer
@@ -33,11 +34,9 @@ class OrthophotoMap:
 
             # Convert RGBA to BGR if needed, or RGB to BGR
             if self.image.shape[2] == 4:
-                # RGBA → BGR
-                self.image = self.image[:, :, [2, 1, 0]]  # drop alpha, swap R↔B
+                self.image = cv2.cvtColor(self.image, cv2.COLOR_RGBA2BGR)
             elif self.image.shape[2] == 3:
-                # RGB → BGR
-                self.image = self.image[:, :, [2, 1, 0]]
+                self.image = cv2.cvtColor(self.image, cv2.COLOR_RGB2BGR)
 
             self.image = np.ascontiguousarray(self.image)
 

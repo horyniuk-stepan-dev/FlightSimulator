@@ -54,57 +54,35 @@ def bbox_hash(west: float, south: float, east: float, north: float, zoom: int) -
     return hashlib.md5(key.encode()).hexdigest()[:12]
 
 
-def download_tiles(
+def _download_raster(
     lat_min: float,
     lon_min: float,
     lat_max: float,
     lon_max: float,
-    zoom: int = 19,
-    cache_dir: str = ".tile_cache",
-    provider=None,
+    zoom: int,
+    cache_dir: str,
+    prefix: str,
+    provider,
 ) -> str:
-    """
-    Download satellite tiles for the given bounding box and return path to GeoTIFF.
-
-    Coordinates are in WGS84 (lat/lon).
-    The resulting GeoTIFF is in Web Mercator (EPSG:3857).
-
-    Args:
-        lat_min, lon_min, lat_max, lon_max: Bounding box in WGS84.
-        zoom: Tile zoom level (18-19 typically free).
-        cache_dir: Directory for caching downloaded tiles.
-        provider: contextily tile provider (default: Esri.WorldImagery).
-
-    Returns:
-        Path to the GeoTIFF file.
-    """
-    if provider is None:
-        provider = cx.providers.Esri.WorldImagery
-
+    """Helper to download and cache a raster map using contextily."""
     cache_path = Path(cache_dir)
     cache_path.mkdir(parents=True, exist_ok=True)
 
-    # Generate cache filename
     tile_hash = bbox_hash(lon_min, lat_min, lon_max, lat_max, zoom)
-    output_path = str(cache_path / f"terrain_{tile_hash}_z{zoom}.tif")
+    output_path = str(cache_path / f"{prefix}_{tile_hash}_z{zoom}.tif")
 
     if os.path.exists(output_path):
-        print(f"[TileLoader] Using cached GeoTIFF: {output_path}")
+        print(f"[TileLoader] Using cached {prefix.capitalize()} GeoTIFF: {output_path}")
         return output_path
 
-    print(f"[TileLoader] Downloading tiles for bbox: "
+    print(f"[TileLoader] Downloading {prefix.capitalize()} tiles for bbox: "
           f"({lat_min:.6f}, {lon_min:.6f}) -> ({lat_max:.6f}, {lon_max:.6f}), zoom={zoom}")
-    print(f"[TileLoader] Provider: {provider.get('name', 'Esri.WorldImagery')}")
 
     num_tiles = 0
     try:
         num_tiles = cx.howmany(lon_min, lat_min, lon_max, lat_max, zoom, ll=True)
     except Exception:
         pass
-
-    # Uncompressed memory estimate: num_tiles * 256 * 256 pixels * 3 bytes (RGB)
-    estimated_size_mb = (num_tiles * 256 * 256 * 3) / (1024 * 1024)
-    print(f"[TileLoader] Estimated tiles: {num_tiles} (~{estimated_size_mb:.1f} MB uncompressed in RAM)")
 
     tracker = ProgressTracker(num_tiles)
     
@@ -116,20 +94,18 @@ def download_tiles(
             tracker.downloaded += 1
             return res
         cx.tile._fetch_tile = patched_fetch_tile
+    else:
+        print("[TileLoader] Warning: contextily._fetch_tile not found. Progress tracking may not work.")
 
     tracker.start()
 
     try:
-        # contextily expects (west, south, east, north) and ll=True for WGS84
         _ = cx.bounds2raster(
-            lon_min,      # west
-            lat_min,      # south
-            lon_max,      # east
-            lat_max,      # north
+            lon_min, lat_min, lon_max, lat_max,
             output_path,
             zoom=zoom,
             source=provider,
-            ll=True,      # input is lat/lon (WGS84)
+            ll=True,
         )
     finally:
         tracker.stop()
@@ -137,9 +113,24 @@ def download_tiles(
             cx.tile._fetch_tile = original_fetch_tile
 
     file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-    print(f"[TileLoader] GeoTIFF saved: {output_path} ({file_size_mb:.1f} MB)")
+    print(f"[TileLoader] {prefix.capitalize()} GeoTIFF saved: {output_path} ({file_size_mb:.1f} MB)")
 
     return output_path
+
+
+def download_tiles(
+    lat_min: float,
+    lon_min: float,
+    lat_max: float,
+    lon_max: float,
+    zoom: int = 19,
+    cache_dir: str = ".tile_cache",
+    provider=None,
+) -> str:
+    """Download satellite tiles."""
+    if provider is None:
+        provider = cx.providers.Esri.WorldImagery
+    return _download_raster(lat_min, lon_min, lat_max, lon_max, zoom, cache_dir, "terrain", provider)
 
 
 def download_elevation(
@@ -150,63 +141,7 @@ def download_elevation(
     zoom: int = 14,
     cache_dir: str = ".tile_cache",
 ) -> str:
-    """
-    Download AWS Terrain elevation tiles for the given bounding box.
-    """
-    cache_path = Path(cache_dir)
-    cache_path.mkdir(parents=True, exist_ok=True)
-
-    # Generate cache filename
-    tile_hash = bbox_hash(lon_min, lat_min, lon_max, lat_max, zoom)
-    output_path = str(cache_path / f"elevation_{tile_hash}_z{zoom}.tif")
-
-    if os.path.exists(output_path):
-        print(f"[TileLoader] Using cached Elevation GeoTIFF: {output_path}")
-        return output_path
-
-    print(f"[TileLoader] Downloading Elevation tiles for bbox: "
-          f"({lat_min:.6f}, {lon_min:.6f}) -> ({lat_max:.6f}, {lon_max:.6f}), zoom={zoom}")
-
-    num_tiles = 0
-    try:
-        num_tiles = cx.howmany(lon_min, lat_min, lon_max, lat_max, zoom, ll=True)
-    except Exception:
-        pass
-
-    tracker = ProgressTracker(num_tiles)
-    
-    # Monkey-patch contextily to track progress
-    original_fetch_tile = getattr(cx.tile, '_fetch_tile', None)
-    if original_fetch_tile:
-        def patched_fetch_tile(*args, **kwargs):
-            res = original_fetch_tile(*args, **kwargs)
-            tracker.downloaded += 1
-            return res
-        cx.tile._fetch_tile = patched_fetch_tile
-
-    tracker.start()
-
-    # Custom provider for AWS Terrarium
-    # R * 256 + G + B / 256 - 32768
+    """Download AWS Terrain elevation tiles."""
     aws_terrarium = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
+    return _download_raster(lat_min, lon_min, lat_max, lon_max, zoom, cache_dir, "elevation", aws_terrarium)
 
-    try:
-        _ = cx.bounds2raster(
-            lon_min,      # west
-            lat_min,      # south
-            lon_max,      # east
-            lat_max,      # north
-            output_path,
-            zoom=zoom,
-            source=aws_terrarium,
-            ll=True,
-        )
-    finally:
-        tracker.stop()
-        if original_fetch_tile:
-            cx.tile._fetch_tile = original_fetch_tile
-
-    file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-    print(f"[TileLoader] Elevation GeoTIFF saved: {output_path} ({file_size_mb:.1f} MB)")
-
-    return output_path

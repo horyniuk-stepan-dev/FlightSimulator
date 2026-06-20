@@ -49,3 +49,12 @@ class TelemetryLogger:
             f"{state.speed_3d:.4f}"
         ])
         self.file_handle.flush()  # Ensure it writes to disk without closing
+
+    def close(self) -> None:
+        """Close the file handle safely."""
+        if hasattr(self, 'file_handle') and not self.file_handle.closed:
+            self.file_handle.flush()
+            self.file_handle.close()
+            
+    def __del__(self) -> None:
+        self.close()

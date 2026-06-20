@@ -60,21 +60,21 @@ def parse_args() -> SimulatorConfig:
 
     # Flight params
     parser.add_argument(
-        "--altitude", type=float, default=1000.0, help="Flight altitude (m)"
+        "--altitude", dest="altitude_m", type=float, default=1000.0, help="Flight altitude (m)"
     )
-    parser.add_argument("--speed", type=float, default=150.0, help="Flight speed (m/s)")
+    parser.add_argument("--speed", dest="speed_m_s", type=float, default=150.0, help="Flight speed (m/s)")
     parser.add_argument(
-        "--overlap", type=float, default=50.0, help="Survey overlap (percent)"
+        "--overlap", dest="overlap_percent", type=float, default=50.0, help="Survey overlap (percent)"
     )
     parser.add_argument(
-        "--grid-angle", type=float, default=0.0, help="Survey grid angle (deg)"
+        "--grid-angle", dest="grid_angle_deg", type=float, default=0.0, help="Survey grid angle (deg)"
     )
 
     # Control
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["manual", "auto", "semi"],
+        choices=["manual", "auto", "semi", "record"],
         default="manual",
         help="Control mode",
     )
@@ -82,6 +82,7 @@ def parse_args() -> SimulatorConfig:
     # File overrides
     parser.add_argument(
         "--geotiff",
+        dest="geotiff_path",
         type=str,
         default="",
         help="Path to existing GeoTIFF (skips download)",
@@ -102,25 +103,7 @@ def parse_args() -> SimulatorConfig:
     )
 
     args = parser.parse_args()
-
-    cfg = SimulatorConfig()
-    cfg.lat_min = args.lat_min
-    cfg.lon_min = args.lon_min
-    cfg.lat_max = args.lat_max
-    cfg.lon_max = args.lon_max
-    cfg.zoom = args.zoom
-    cfg.altitude_m = args.altitude
-    cfg.speed_m_s = args.speed
-    cfg.overlap_percent = args.overlap
-    cfg.grid_angle_deg = args.grid_angle
-    cfg.mode = args.mode
-    cfg.geotiff_path = args.geotiff
-
-    # Attach telemetry args dynamically to cfg for convenience
-    cfg.telemetry_file = args.telemetry_file
-    cfg.telemetry_interval = args.telemetry_interval
-
-    return cfg
+    return SimulatorConfig(**vars(args))
 
 
 def main():
@@ -167,7 +150,7 @@ def main():
     flight_ctrl = FlightController(cfg.physics, initial_position=initial_pos)
 
     # 4. Control setup
-    if cfg.mode == "auto" or cfg.mode == "semi":
+    if cfg.mode in ("auto", "semi", "record"):
         print(f"Generating survey path for {cfg.mode} mode...")
         waypoints = SurveyPlanner.generate_path(
             bounds_local=bounds,
@@ -178,7 +161,7 @@ def main():
         )
         print(f"Generated {len(waypoints)} waypoints.")
 
-        if cfg.mode == "auto":
+        if cfg.mode in ("auto", "record"):
             command_source = AutoPilot(waypoints, speed_m_s=cfg.speed_m_s)
         else:
             manual = ManualControl(speed_xy=cfg.speed_m_s, speed_z=cfg.speed_m_s * 0.5)
@@ -205,8 +188,6 @@ def main():
     )
 
     # Need a tiny delay to ensure window is created before polling properties
-    import cv2
-
     cv2.waitKey(1)
 
     if cfg.mode == "manual":
@@ -266,21 +247,24 @@ def main():
             raw_frame = renderer.render(state)
 
             # HUD
-            progress = getattr(command_source, "progress_str", "")
-            waypoints = getattr(command_source, "waypoints", [])
-            current_wp_idx = getattr(command_source, "current_wp_idx", 0)
-
-            hud_frame = hud.render(
-                raw_frame,
-                state,
-                mode_name=command_source.mode_name,
-                fps=actual_fps,
-                gsd=gsd,
-                progress=progress,
-                P_matrix=getattr(renderer, "last_P", None),
-                waypoints=waypoints,
-                current_wp_idx=current_wp_idx,
-            )
+            if cfg.mode == "record":
+                hud_frame = raw_frame
+            else:
+                progress = getattr(command_source, "progress_str", "")
+                waypoints = getattr(command_source, "waypoints", [])
+                current_wp_idx = getattr(command_source, "current_wp_idx", 0)
+    
+                hud_frame = hud.render(
+                    raw_frame,
+                    state,
+                    mode_name=command_source.mode_name,
+                    fps=actual_fps,
+                    gsd=gsd,
+                    progress=progress,
+                    P_matrix=getattr(renderer, "last_P", None),
+                    waypoints=waypoints,
+                    current_wp_idx=current_wp_idx,
+                )
 
             # Consume
             for sink in sinks:
@@ -298,6 +282,7 @@ def main():
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
     finally:
+        telemetry_logger.close()
         for sink in sinks:
             sink.cleanup()
         print("Simulation ended.")

@@ -49,7 +49,7 @@ class AutoPilot(CommandSource):
         
         dist_xy = math.hypot(dx, dy)
         dist_z = abs(dz)
-        dist_total = math.sqrt(dx**2 + dy**2 + dz**2)
+        dist_total = math.hypot(dist_xy, dz)
 
         # Check if arrived
         if dist_total < self.arrival_threshold:
@@ -62,7 +62,7 @@ class AutoPilot(CommandSource):
             dy = target.y - state.position[1]
             dz = target.z - state.position[2]
             dist_xy = math.hypot(dx, dy)
-            dist_total = math.sqrt(dx**2 + dy**2 + dz**2)
+            dist_total = math.hypot(dist_xy, dz)
 
         # Proportional controller for velocity
         vx_desired = dx
@@ -70,7 +70,7 @@ class AutoPilot(CommandSource):
         vz_desired = dz
 
         # Scale to max speed
-        v_desired_mag = math.sqrt(vx_desired**2 + vy_desired**2 + vz_desired**2)
+        v_desired_mag = dist_total
         if v_desired_mag > self.speed:
             scale = self.speed / v_desired_mag
             vx_desired *= scale
@@ -82,7 +82,7 @@ class AutoPilot(CommandSource):
         dvy = vy_desired - self.current_vy
         dvz = vz_desired - self.current_vz
         
-        dv_mag = math.sqrt(dvx**2 + dvy**2 + dvz**2)
+        dv_mag = math.hypot(math.hypot(dvx, dvy), dvz)
         max_dv = self.max_accel * dt
         if dv_mag > max_dv:
             scale = max_dv / dv_mag

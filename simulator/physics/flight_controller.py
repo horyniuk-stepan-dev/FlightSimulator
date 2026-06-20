@@ -6,6 +6,8 @@ control_abstraction='cmd_vel' already implements a full SE3-based velocity
 tracking controller internally (velocity → desired force → attitude → motor speeds).
 """
 import numpy as np
+from scipy.spatial.transform import Rotation
+
 from simulator.physics.drone_state import DroneState
 from simulator.config import PhysicsConfig
 
@@ -137,7 +139,6 @@ class FlightController:
             Updated DroneState.
         """
         if kinematic:
-            from scipy.spatial.transform import Rotation
             self._state['x'] += velocity_cmd * dt
             self._state['v'] = velocity_cmd.copy()
             # Rotation: Yaw around Z, Pitch around X (since Y is forward)

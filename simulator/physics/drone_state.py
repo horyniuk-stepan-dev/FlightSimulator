@@ -3,8 +3,8 @@ Drone state dataclass — represents the complete state of the simulated drone.
 """
 from dataclasses import dataclass, field
 
+import math
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 
 @dataclass
@@ -26,10 +26,9 @@ class DroneState:
     @property
     def yaw(self) -> float:
         """Extract yaw angle from quaternion (radians)."""
-        r = Rotation.from_quat(self.quaternion)
-        # ZYX euler: returns (roll, pitch, yaw) — we want Z rotation
-        _, _, yaw = r.as_euler('XYZ')
-        return yaw
+        q = self.quaternion
+        # Fast formula directly from quaternion [x, y, z, w]
+        return math.atan2(2 * (q[3] * q[2] + q[0] * q[1]), 1 - 2 * (q[1]**2 + q[2]**2))
 
     @property
     def speed(self) -> float:

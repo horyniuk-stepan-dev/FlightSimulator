@@ -48,13 +48,12 @@ class SimulatorConfig:
     overlap_percent: float = 70.0
     grid_angle_deg: float = 0.0
 
-    # Mode: "manual" or "auto"
-    # Mode: "manual", "auto", or "semi"
+    # Mode: "manual", "auto", "semi", or "record"
     mode: str = "manual"
 
     # Render
     target_fps: int = 30
-    physics_substeps: int = 5  # Physics steps per render frame
+    physics_substeps: int = 20  # Physics steps per render frame
 
     # Components
     camera: CameraConfig = field(default_factory=CameraConfig)
@@ -62,3 +61,7 @@ class SimulatorConfig:
 
     # Tile cache directory
     cache_dir: str = ".tile_cache"
+
+    # Telemetry logging
+    telemetry_file: str = "telemetry.csv"
+    telemetry_interval: int = 15
