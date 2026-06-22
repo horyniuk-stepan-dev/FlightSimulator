@@ -65,3 +65,8 @@ class SimulatorConfig:
     # Telemetry logging
     telemetry_file: str = "telemetry.csv"
     telemetry_interval: int = 15
+    
+    # Video and Calibration logging
+    video_file: str = ""
+    calib_file: str = ""
+    frame_step: int = 30

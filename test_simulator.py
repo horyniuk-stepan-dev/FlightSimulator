@@ -64,13 +64,13 @@ try:
     
     # Step with zero velocity command (should hover)
     for i in range(10):
-        state = fc.step(np.array([0.0, 0.0, 0.0]), 0.0, 0.01)
+        state = fc.step(np.array([0.0, 0.0, 0.0]), 0.0, 0.0, 0.01)
     print(f"    After 10 hover steps: pos={state.position}, vel={state.velocity}")
     print(f"    Altitude drift: {state.altitude - 100.0:.4f} m")
     
     # Step with forward velocity
     for i in range(10):
-        state = fc.step(np.array([2.0, 0.0, 0.0]), 0.0, 0.01)
+        state = fc.step(np.array([2.0, 0.0, 0.0]), 0.0, 0.0, 0.01)
     print(f"    After 10 forward steps: pos={state.position}, vel={state.velocity}")
     print("    [OK] Flight controller works")
 except Exception as e:

@@ -16,3 +16,11 @@ telemetry.csv
 .DS_Store
 Thumbs.db
 simulator/allFiles/*
+
+# User requested
+calibration.json
+flight.mp4
+Main_project_files_all_merged_new.py
+logs/app.log
+logs/metrics.jsonl
+models/yolo11n-seg.pt

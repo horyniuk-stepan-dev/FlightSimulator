@@ -4,12 +4,63 @@ Flight controller — wraps RotorPy Multirotor with cmd_vel control abstraction.
 Uses RotorPy's built-in velocity controller: the Multirotor class with
 control_abstraction='cmd_vel' already implements a full SE3-based velocity
 tracking controller internally (velocity → desired force → attitude → motor speeds).
+
+Performance optimizations:
+- Kinematic mode: inline euler→quaternion (avoids scipy.Rotation overhead)
+- Reduced array copies in hot path
 """
+import math
+
 import numpy as np
-from scipy.spatial.transform import Rotation
 
 from simulator.physics.drone_state import DroneState
 from simulator.config import PhysicsConfig
+
+
+def _euler_zxy_to_quat(yaw: float, pitch: float, roll: float) -> np.ndarray:
+    """Convert ZXY Euler angles to quaternion [x, y, z, w].
+    
+    Inline formula avoids scipy.spatial.transform.Rotation.from_euler overhead.
+    ZXY intrinsic = composition q = qz * qx * qy (Hamilton product).
+    
+    When roll=0 (most common case), qy=identity, so q = qz * qx:
+      qz = [0, 0, sin(yaw/2), cos(yaw/2)]
+      qx = [sin(pitch/2), 0, 0, cos(pitch/2)]
+    """
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    
+    if roll == 0.0:
+        # Fast path: qz * qx (Hamilton product, roll=0 means qy=identity)
+        w = cy * cp
+        x = cy * sp
+        y = sy * sp
+        z = sy * cp
+    else:
+        cr = math.cos(roll * 0.5)
+        sr = math.sin(roll * 0.5)
+        
+        # Full qz * qx * qy Hamilton product
+        # First: qzx = qz * qx
+        w_zx = cy * cp
+        x_zx = cy * sp
+        y_zx = sy * sp
+        z_zx = sy * cp
+        
+        # Then: q = qzx * qy where qy = [x=0, y=sr, z=0, w=cr]
+        # Hamilton product: q1*q2
+        # w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+        # x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+        # y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+        # z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+        w = w_zx * cr - y_zx * sr
+        x = x_zx * cr - z_zx * sr
+        y = w_zx * sr + y_zx * cr
+        z = x_zx * sr + z_zx * cr
+    
+    return np.array([x, y, z, w], dtype=np.float64)
 
 
 def _make_quad_params(cfg: PhysicsConfig) -> dict:
@@ -66,6 +117,10 @@ def _make_quad_params(cfg: PhysicsConfig) -> dict:
         'kp_att': cfg.kp_att,
         'kd_att': cfg.kd_att,
     }
+
+
+# Pre-allocated zero arrays to avoid repeated allocation in hot path
+_ZEROS3 = np.zeros(3, dtype=np.float64)
 
 
 class FlightController:
@@ -139,13 +194,14 @@ class FlightController:
             Updated DroneState.
         """
         if kinematic:
+            # Direct integration — no physics simulation
             self._state['x'] += velocity_cmd * dt
-            self._state['v'] = velocity_cmd.copy()
-            # Rotation: Yaw around Z, Pitch around X (since Y is forward)
-            self._state['q'] = Rotation.from_euler('ZXY', [target_yaw, target_pitch, 0.0]).as_quat()
-            self._state['w'] = np.zeros(3)
+            self._state['v'] = velocity_cmd
+            # Inline euler→quaternion (avoids scipy.Rotation.from_euler overhead)
+            self._state['q'] = _euler_zxy_to_quat(target_yaw, target_pitch, 0.0)
+            self._state['w'] = _ZEROS3
             self._time += dt
-            return DroneState.from_rotorpy_state(self._state, self._time)
+            return DroneState.from_rotorpy_state_nocopy(self._state, self._time)
 
         # Build flat outputs for SE3Control.
         # We set 'x' to current state['x'] so pos_err = 0.
@@ -153,9 +209,9 @@ class FlightController:
         flat_output = {
             'x': self._state['x'].copy(),
             'x_dot': velocity_cmd.astype(np.float64),
-            'x_ddot': np.zeros(3),
-            'x_dddot': np.zeros(3),
-            'x_ddddot': np.zeros(3),
+            'x_ddot': _ZEROS3,
+            'x_dddot': _ZEROS3,
+            'x_ddddot': _ZEROS3,
             'yaw': target_yaw,
             'yaw_dot': 0.0
         }
