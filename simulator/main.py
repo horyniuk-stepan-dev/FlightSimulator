@@ -4,6 +4,7 @@ Ties together physics, rendering, planning, and control.
 """
 
 import argparse
+import math
 import sys
 import time
 from pathlib import Path
@@ -98,6 +99,46 @@ def parse_args() -> SimulatorConfig:
         default="manual",
         help="Control mode",
     )
+    parser.add_argument(
+        "--no-gamepad",
+        dest="enable_gamepad",
+        action="store_false",
+        help="Disable gamepad/controller support (DualShock 4, etc.)",
+    )
+    parser.add_argument(
+        "--gamepad-mode",
+        dest="gamepad_mode",
+        type=str,
+        choices=["arcade", "realistic"],
+        default="arcade",
+        help="Gamepad control style: 'arcade' (instant velocity, camera on right stick) "
+        "or 'realistic' (RC Mode 2 — throttle+yaw on left stick, pitch+roll on right, "
+        "inertia & drag physics)",
+    )
+
+    # Performance / output rate
+    parser.add_argument(
+        "--fps",
+        dest="target_fps",
+        type=int,
+        default=30,
+        help="Recorded video frame rate / playback FPS (default 30). "
+        "Частота кадрів запису відео.",
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Run the simulation as fast as possible (no real-time throttle). "
+        "Обробка на максимальній швидкості; відео все одно пишеться у --fps.",
+    )
+    parser.add_argument(
+        "--no-display",
+        "--headless",
+        dest="no_display",
+        action="store_true",
+        help="Do not open the live preview window (headless). "
+        "Не показувати вікно з польотом дрона.",
+    )
 
     # File overrides
     parser.add_argument(
@@ -121,7 +162,7 @@ def parse_args() -> SimulatorConfig:
         default=15,
         help="Save telemetry every N frames",
     )
-    
+
     # Video and Calibration Output
     parser.add_argument(
         "--video-file",
@@ -136,10 +177,50 @@ def parse_args() -> SimulatorConfig:
         help="Path to save calibration JSON",
     )
     parser.add_argument(
+        "--gt-file",
+        dest="gt_file",
+        type=str,
+        default="",
+        help="Шлях до ground_truth.json — GT по КОЖНОМУ слоту для "
+        "validate_vs_telemetry.py (Етап 0.2). Потребує --calib-file",
+    )
+    parser.add_argument(
         "--frame-step",
         type=int,
         default=30,
-        help="Frame step to sync calibration indices with Topometric Database",
+        help="Frame step to sync calibration indices with Topometric Database "
+        "(МУСИТЬ збігатися з database.frame_step системи локалізації)",
+    )
+    parser.add_argument(
+        "--anchor-spacing-slots",
+        dest="anchor_spacing_slots",
+        type=int,
+        default=15,
+        help="Мінімальний інтервал між якорями калібрування (у слотах БД)",
+    )
+    parser.add_argument(
+        "--anchor-turn-rate-deg",
+        dest="anchor_turn_rate_deg",
+        type=float,
+        default=3.0,
+        help="Поріг швидкості зміни напрямку руху (°/слот БД): вище — розворот, "
+        "якорі ставляться на його межах та апексі",
+    )
+    parser.add_argument(
+        "--heading-hold-deg",
+        dest="heading_hold_deg",
+        type=float,
+        default=None,
+        help="Сталий курс камери у градусах (heading-hold, як гімбал реального "
+        "дрона): кадри всіх ніг серпантину матимуть однакову орієнтацію. "
+        "Без прапорця ніс слідує за вектором швидкості",
+    )
+    parser.add_argument(
+        "--anchor-max-spacing-slots",
+        dest="anchor_max_spacing_slots",
+        type=int,
+        default=60,
+        help="Максимальний інтервал між якорями (у слотах БД) на прямих ділянках",
     )
 
     args = parser.parse_args()
@@ -202,9 +283,16 @@ def main():
         print(f"Generated {len(waypoints)} waypoints.")
 
         if cfg.mode in ("auto", "record"):
-            command_source = AutoPilot(waypoints, speed_m_s=cfg.speed_m_s)
+            hold_rad = (
+                math.radians(cfg.heading_hold_deg)
+                if cfg.heading_hold_deg is not None
+                else None
+            )
+            command_source = AutoPilot(
+                waypoints, speed_m_s=cfg.speed_m_s, hold_heading_rad=hold_rad
+            )
         else:
-            manual = ManualControl(speed_xy=cfg.speed_m_s, speed_z=cfg.speed_m_s * 0.5)
+            manual = ManualControl(speed_xy=cfg.speed_m_s, speed_z=cfg.speed_m_s * 0.5, enable_gamepad=cfg.enable_gamepad, gamepad_mode=cfg.gamepad_mode)
             command_source = SemiAutoControl(manual, waypoints)
 
         if waypoints:
@@ -214,37 +302,56 @@ def main():
     else:
         print("Starting in Manual mode (Keyboard: WASD + Space/Shift)")
         command_source = ManualControl(
-            speed_xy=cfg.speed_m_s, speed_z=cfg.speed_m_s * 0.5
+            speed_xy=cfg.speed_m_s, speed_z=cfg.speed_m_s * 0.5,
+            enable_gamepad=cfg.enable_gamepad,
+            gamepad_mode=cfg.gamepad_mode,
         )
 
     # 5. Display Sinks and Telemetry
     window_name = "Drone Simulator"
-    sinks = [DisplaySink(window_name)]
-    
+    sinks = []
+    if cfg.no_display:
+        print("Headless mode: live preview window disabled.")
+        if not cfg.video_file and not cfg.calib_file:
+            print(
+                "  Note: no --video-file / --calib-file given, so only telemetry "
+                "will be produced."
+            )
+    else:
+        sinks.append(DisplaySink(window_name))
+
     if cfg.video_file:
         video_sink = VideoWriterSink(cfg.video_file, cfg.target_fps, camera.image_width_px, camera.image_height_px)
     else:
         video_sink = None
-        
+
     telemetry_logger = TelemetryLogger(
         output_file=cfg.telemetry_file, log_interval_frames=cfg.telemetry_interval
     )
     print(
         f"Telemetry will be saved to: {cfg.telemetry_file} every {cfg.telemetry_interval} frames"
     )
-    
+
     if cfg.calib_file:
-        calib_logger = CalibrationLogger(cfg.calib_file, ortho_map, cfg.telemetry_interval, cfg.frame_step)
+        calib_logger = CalibrationLogger(
+            cfg.calib_file,
+            ortho_map,
+            frame_step=cfg.frame_step,
+            turn_rate_deg_per_slot=cfg.anchor_turn_rate_deg,
+            min_anchor_spacing_slots=cfg.anchor_spacing_slots,
+            max_anchor_spacing_slots=cfg.anchor_max_spacing_slots,
+        )
     else:
         calib_logger = None
 
-    # Need a tiny delay to ensure window is created before polling properties
-    cv2.waitKey(1)
+    if not cfg.no_display:
+        # Need a tiny delay to ensure window is created before polling properties
+        cv2.waitKey(1)
 
-    if cfg.mode == "manual":
-        # command_source.on_mouse is obsolete but keeping it prevents breaking
-        if hasattr(command_source, "on_mouse"):
-            cv2.setMouseCallback(window_name, command_source.on_mouse)
+        if cfg.mode == "manual":
+            # command_source.on_mouse is obsolete but keeping it prevents breaking
+            if hasattr(command_source, "on_mouse"):
+                cv2.setMouseCallback(window_name, command_source.on_mouse)
 
     if cfg.mode == "record":
         try:
@@ -256,37 +363,48 @@ def main():
             sys.exit(0)
 
     # 6. Main Loop
+    # "offline" == run the loop at maximum speed with a fixed timestep, with no
+    # wall-clock pacing. Enabled by --fast or the legacy "record" mode. The output
+    # video is still written at cfg.target_fps, so playback speed is unaffected.
+    offline = cfg.fast or cfg.mode == "record"
     target_dt = 1.0 / cfg.target_fps
     physics_dt = 1.0 / 100.0  # Fixed 100 Hz physics step for stability
 
-    print(f"Starting simulation loop (Target FPS: {cfg.target_fps})...")
+    speed_desc = "MAX SPEED" if offline else f"real-time {cfg.target_fps} FPS"
+    print(
+        f"Starting simulation loop ({speed_desc}; video written @ "
+        f"{cfg.target_fps} FPS)..."
+    )
 
     prev_time = time.perf_counter()
     accumulated_time = 0.0
+    # Лічильник кадрів У ЛОКСТЕПІ з video_sink: саме цей індекс бачитиме
+    # DatabaseBuilder у відеофайлі, і саме від нього рахуються слоти якорів
+    video_frame_idx = 0
 
     try:
         while not command_source.is_finished():
-            if cfg.mode == "record":
+            if offline:
                 # Offline rendering: run as fast as possible, simulating exactly target_dt per frame
                 actual_dt = target_dt
                 actual_fps = cfg.target_fps
             else:
                 curr_time = time.perf_counter()
                 actual_dt = curr_time - prev_time
-    
+
                 # Improved frame pacing: sleep for bulk of wait, spin-wait only the last ~2ms.
                 if actual_dt < target_dt:
                     remaining = target_dt - actual_dt
                     if remaining > 0.003:
                         time.sleep(remaining - 0.002)
                     continue
-    
+
                 prev_time = curr_time
                 actual_fps = 1.0 / actual_dt if actual_dt > 0 else 0.0
 
             accumulated_time += actual_dt
             # Prevent "spiral of death" if rendering becomes very slow
-            if cfg.mode != "record" and accumulated_time > 0.1:
+            if not offline and accumulated_time > 0.1:
                 accumulated_time = 0.1
 
             # Step Physics (multiple fixed substeps for stability)
@@ -295,11 +413,12 @@ def main():
             cmd_v = cmd.to_numpy()
             target_yaw = cmd.yaw_rate  # We stored target_yaw in yaw_rate
             target_pitch = cmd.pitch_rate
+            target_roll = cmd.roll
             is_kinematic = True
 
             while accumulated_time >= physics_dt:
                 state = flight_ctrl.step(
-                    cmd_v, target_yaw, target_pitch, physics_dt, kinematic=is_kinematic
+                    cmd_v, target_yaw, target_pitch, physics_dt, kinematic=is_kinematic, roll=target_roll
                 )
                 accumulated_time -= physics_dt
 
@@ -309,48 +428,62 @@ def main():
             # Render frame
             gsd = camera.gsd_m_per_px(state.altitude)
             raw_frame = renderer.render(state)
-            
+
             current_wp_idx = getattr(command_source, "current_wp_idx", 0)
-            
-            if calib_logger and hasattr(renderer, "last_P") and renderer.last_P is not None:
-                H1 = renderer.last_P[:, [0, 1, 3]]
-                lat, lon = ortho_map.local_to_gps(state.position[0], state.position[1])
-                calib_logger.log(H1, camera.image_width_px, camera.image_height_px, state, lat, lon, current_wp_idx)
 
-            # HUD
-            if cfg.mode == "record":
-                hud_frame = raw_frame
-            else:
-                progress = getattr(command_source, "progress_str", "")
-                waypoints = getattr(command_source, "waypoints", [])
-
-                hud_frame = hud.render(
-                    raw_frame,
+            if calib_logger:
+                # Викликаємо на КОЖЕН кадр (навіть без last_P) — логер веде
+                # вікно стабільності курсу; frame_idx = індекс кадру у відео
+                last_P = getattr(renderer, "last_P", None)
+                H1 = last_P[:, [0, 1, 3]] if last_P is not None else None
+                calib_logger.log(
+                    H1,
+                    camera.image_width_px,
+                    camera.image_height_px,
                     state,
-                    mode_name=command_source.mode_name,
-                    fps=actual_fps,
-                    gsd=gsd,
-                    progress=progress,
-                    P_matrix=getattr(renderer, "last_P", None),
-                    waypoints=waypoints,
-                    current_wp_idx=current_wp_idx,
+                    frame_idx=video_frame_idx,
                 )
 
-            # Consume
-            for sink in sinks:
-                sink.consume(hud_frame)
-                
+            # Display preview — only built when a window is actually open. The
+            # recorded video always receives the clean raw_frame below, never the
+            # HUD overlay, so skipping the HUD here costs the video nothing.
+            if sinks:
+                if offline:
+                    hud_frame = raw_frame
+                else:
+                    progress = getattr(command_source, "progress_str", "")
+                    waypoints = getattr(command_source, "waypoints", [])
+
+                    hud_frame = hud.render(
+                        raw_frame,
+                        state,
+                        mode_name=command_source.mode_name,
+                        fps=actual_fps,
+                        gsd=gsd,
+                        progress=progress,
+                        P_matrix=getattr(renderer, "last_P", None),
+                        waypoints=waypoints,
+                        current_wp_idx=current_wp_idx,
+                    )
+
+                for sink in sinks:
+                    sink.consume(hud_frame)
+
             if video_sink:
                 video_sink.consume(raw_frame)
+            video_frame_idx += 1
 
-            # OpenCV waitKey
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27:  # ESC
-                break
+            # Window event pump + ESC / close handling — only when a window is
+            # open. Skipping cv2.waitKey(1) in headless mode removes a ~1 ms/frame
+            # stall, which is a big part of what lets processing run at full speed.
+            if sinks:
+                key = cv2.waitKey(1) & 0xFF
+                if key == 27:  # ESC
+                    break
 
-            # Check if user closed the window via 'X' button
-            if any(sink.is_closed() for sink in sinks):
-                break
+                # Check if user closed the window via 'X' button
+                if any(sink.is_closed() for sink in sinks):
+                    break
 
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
@@ -358,6 +491,8 @@ def main():
         telemetry_logger.close()
         if calib_logger:
             calib_logger.close()
+            if cfg.gt_file:
+                calib_logger.dump_ground_truth(cfg.gt_file, fps=cfg.target_fps)
         for sink in sinks:
             sink.cleanup()
         if video_sink:

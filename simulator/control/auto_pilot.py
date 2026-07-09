@@ -15,10 +15,20 @@ class AutoPilot(CommandSource):
     Automatically flies the drone through a list of waypoints.
     """
 
-    def __init__(self, waypoints: list[Waypoint], speed_m_s: float = 5.0, arrival_threshold_m: float = 150.0):
+    def __init__(
+        self,
+        waypoints: list[Waypoint],
+        speed_m_s: float = 5.0,
+        arrival_threshold_m: float = 150.0,
+        hold_heading_rad: float | None = None,
+    ):
         self.waypoints = waypoints
         self.speed = speed_m_s
         self.arrival_threshold = arrival_threshold_m
+        # Heading-hold: камера/ніс тримають сталий курс (як гімбал реального
+        # дрона у survey-місії) — кадри всіх ніг серпантину мають ОДНАКОВУ
+        # орієнтацію, матчинг локалізатора не деградує на розворотах.
+        self.hold_heading = hold_heading_rad
         
         self.current_wp_idx = 0
         self._finished = len(waypoints) == 0
@@ -98,9 +108,17 @@ class AutoPilot(CommandSource):
         cmd.vy = self.current_vy
         cmd.vz = self.current_vz
 
-        # Steer nose smoothly towards velocity vector
+        # Steer nose smoothly towards velocity vector (або тримаємо сталий курс)
         vel_xy_mag = math.hypot(self.current_vx, self.current_vy)
-        if vel_xy_mag > 0.5:
+        if self.hold_heading is not None:
+            desired_yaw = self.hold_heading
+            if self.current_yaw is None:
+                self.current_yaw = desired_yaw
+            dyaw = (desired_yaw - self.current_yaw + math.pi) % (2 * math.pi) - math.pi
+            max_dyaw = self.max_yaw_rate * dt
+            self.current_yaw += max(-max_dyaw, min(max_dyaw, dyaw))
+            self.current_yaw = (self.current_yaw + math.pi) % (2 * math.pi) - math.pi
+        elif vel_xy_mag > 0.5:
             desired_yaw = math.atan2(-self.current_vx, self.current_vy)
             if self.current_yaw is None:
                 self.current_yaw = desired_yaw

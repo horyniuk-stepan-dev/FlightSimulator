@@ -17,6 +17,7 @@ class CommandVector:
     vz: float = 0.0      # Velocity in world Z (Up) m/s
     yaw_rate: float = 0.0  # target yaw
     pitch_rate: float = 0.0 # target pitch
+    roll: float = 0.0      # target roll (used in realistic mode)
 
     def to_numpy(self) -> np.ndarray:
         return np.array([self.vx, self.vy, self.vz])

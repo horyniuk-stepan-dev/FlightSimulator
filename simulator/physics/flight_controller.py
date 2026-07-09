@@ -180,15 +180,17 @@ class FlightController:
         print(f"[FlightController] Initialized at position {pos}, "
               f"mass={cfg.mass_kg}kg, hover_speed={hover_speed:.1f} rad/s")
 
-    def step(self, velocity_cmd: np.ndarray, target_yaw: float, target_pitch: float, dt: float, kinematic: bool = False) -> DroneState:
+    def step(self, velocity_cmd: np.ndarray, target_yaw: float, target_pitch: float, dt: float, kinematic: bool = False, roll: float = 0.0) -> DroneState:
         """
         Advance physics by dt seconds with the given velocity command.
 
         Args:
             velocity_cmd: Desired velocity [vx, vy, vz] in world frame (m/s).
             target_yaw: Desired yaw angle in radians.
+            target_pitch: Desired pitch angle in radians.
             dt: Time step in seconds.
             kinematic: If True, bypasses physics and integrates velocity directly (arcade mode).
+            roll: Desired roll angle in radians (used in kinematic mode).
 
         Returns:
             Updated DroneState.
@@ -198,7 +200,7 @@ class FlightController:
             self._state['x'] += velocity_cmd * dt
             self._state['v'] = velocity_cmd
             # Inline euler→quaternion (avoids scipy.Rotation.from_euler overhead)
-            self._state['q'] = _euler_zxy_to_quat(target_yaw, target_pitch, 0.0)
+            self._state['q'] = _euler_zxy_to_quat(target_yaw, target_pitch, roll)
             self._state['w'] = _ZEROS3
             self._time += dt
             return DroneState.from_rotorpy_state_nocopy(self._state, self._time)

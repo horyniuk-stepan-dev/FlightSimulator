@@ -51,9 +51,21 @@ class SimulatorConfig:
     # Mode: "manual", "auto", "semi", or "record"
     mode: str = "manual"
 
+    # Gamepad support (DualShock 4 / any SDL-compatible controller)
+    enable_gamepad: bool = True
+    # Gamepad control style: "arcade" (instant velocity) or "realistic" (RC Mode 2 with inertia)
+    gamepad_mode: str = "arcade"
+
     # Render
     target_fps: int = 30
     physics_substeps: int = 20  # Physics steps per render frame
+
+    # Performance / headless
+    # fast: run the loop at maximum speed (no real-time throttle). The recorded
+    # video is still written at target_fps, so playback speed stays correct.
+    fast: bool = False
+    # no_display: do not open the live preview window (headless run).
+    no_display: bool = False
 
     # Components
     camera: CameraConfig = field(default_factory=CameraConfig)
@@ -65,8 +77,21 @@ class SimulatorConfig:
     # Telemetry logging
     telemetry_file: str = "telemetry.csv"
     telemetry_interval: int = 15
-    
+
     # Video and Calibration logging
     video_file: str = ""
     calib_file: str = ""
+    # Ground-truth експорт ПО СЛОТАХ для validate_vs_telemetry.py (Етап 0.2).
+    # Порожньо → не пишеться. Потребує --calib-file (спільний CalibrationLogger).
+    gt_file: str = ""
+    # МУСИТЬ збігатися з database.frame_step системи локалізації:
+    # слот БД S = кадр відео S * frame_step
     frame_step: int = 30
+    # Якорі: поріг швидкості зміни напрямку руху (°/слот БД), мін. інтервал
+    # додаткових якорів та макс. інтервал між якорями на прямих ділянках
+    anchor_turn_rate_deg: float = 3.0
+    anchor_spacing_slots: int = 15
+    anchor_max_spacing_slots: int = 60
+    # Heading-hold (градуси): сталий курс камери на весь політ, як у гімбала
+    # реального дрона. None → ніс слідує за вектором швидкості (стара поведінка)
+    heading_hold_deg: float | None = None
