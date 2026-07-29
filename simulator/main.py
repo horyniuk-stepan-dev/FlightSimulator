@@ -292,7 +292,12 @@ def main():
                 waypoints, speed_m_s=cfg.speed_m_s, hold_heading_rad=hold_rad
             )
         else:
-            manual = ManualControl(speed_xy=cfg.speed_m_s, speed_z=cfg.speed_m_s * 0.5, enable_gamepad=cfg.enable_gamepad, gamepad_mode=cfg.gamepad_mode)
+            manual = ManualControl(
+                speed_xy=cfg.speed_m_s,
+                speed_z=cfg.speed_m_s * 0.5,
+                enable_gamepad=cfg.enable_gamepad,
+                gamepad_mode=cfg.gamepad_mode,
+            )
             command_source = SemiAutoControl(manual, waypoints)
 
         if waypoints:
@@ -302,7 +307,8 @@ def main():
     else:
         print("Starting in Manual mode (Keyboard: WASD + Space/Shift)")
         command_source = ManualControl(
-            speed_xy=cfg.speed_m_s, speed_z=cfg.speed_m_s * 0.5,
+            speed_xy=cfg.speed_m_s,
+            speed_z=cfg.speed_m_s * 0.5,
             enable_gamepad=cfg.enable_gamepad,
             gamepad_mode=cfg.gamepad_mode,
         )
@@ -321,7 +327,12 @@ def main():
         sinks.append(DisplaySink(window_name))
 
     if cfg.video_file:
-        video_sink = VideoWriterSink(cfg.video_file, cfg.target_fps, camera.image_width_px, camera.image_height_px)
+        video_sink = VideoWriterSink(
+            cfg.video_file,
+            cfg.target_fps,
+            camera.image_width_px,
+            camera.image_height_px,
+        )
     else:
         video_sink = None
 
@@ -418,7 +429,12 @@ def main():
 
             while accumulated_time >= physics_dt:
                 state = flight_ctrl.step(
-                    cmd_v, target_yaw, target_pitch, physics_dt, kinematic=is_kinematic, roll=target_roll
+                    cmd_v,
+                    target_yaw,
+                    target_pitch,
+                    physics_dt,
+                    kinematic=is_kinematic,
+                    roll=target_roll,
                 )
                 accumulated_time -= physics_dt
 
@@ -427,7 +443,9 @@ def main():
 
             # Render frame
             gsd = camera.gsd_m_per_px(state.altitude)
+            _t0 = time.perf_counter()
             raw_frame = renderer.render(state)
+            _t_render = time.perf_counter() - _t0
 
             current_wp_idx = getattr(command_source, "current_wp_idx", 0)
 
@@ -447,6 +465,7 @@ def main():
             # Display preview — only built when a window is actually open. The
             # recorded video always receives the clean raw_frame below, never the
             # HUD overlay, so skipping the HUD here costs the video nothing.
+            _t1 = time.perf_counter()
             if sinks:
                 if offline:
                     hud_frame = raw_frame
@@ -468,6 +487,7 @@ def main():
 
                 for sink in sinks:
                     sink.consume(hud_frame)
+            _t2 = time.perf_counter()
 
             if video_sink:
                 video_sink.consume(raw_frame)
@@ -478,6 +498,18 @@ def main():
             # stall, which is a big part of what lets processing run at full speed.
             if sinks:
                 key = cv2.waitKey(1) & 0xFF
+                _t3 = time.perf_counter()
+                if video_frame_idx % 10 == 0:
+                    _keys = sorted(getattr(command_source, "_keys_pressed", set()))
+                    print(
+                        f"render={_t_render * 1000:5.1f}  "
+                        f"hud+show={(_t2 - _t1) * 1000:5.1f}  "
+                        f"waitKey={(_t3 - _t2) * 1000:5.1f}  "
+                        f"fps={actual_fps:4.1f}  "
+                        f"pos={state.position[0]:7.1f},{state.position[1]:7.1f},"
+                        f"{state.position[2]:6.1f}  "
+                        f"yaw={math.degrees(state.yaw):6.1f}  keys={_keys}"
+                    )
                 if key == 27:  # ESC
                     break
 

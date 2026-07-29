@@ -1,0 +1,1 @@
+& ".\.venv\Scripts\python.exe" -m simulator.main --gamepad-mode realistic

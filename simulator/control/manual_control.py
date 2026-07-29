@@ -1,5 +1,5 @@
 """
-Manual Control — uses pynput to read keyboard input for WASD flight.
+Manual Control — polls keyboard state (see key_state.py) for WASD flight.
 Optionally integrates a gamepad (DualShock 4 or any SDL-compatible controller)
 via ``GamepadControl`` as a parallel input source.
 
@@ -13,9 +13,8 @@ import logging
 import math
 import threading
 
-from pynput import keyboard, mouse
-
 from simulator.control.command_source import CommandSource, CommandVector
+from simulator.control.key_state import make_key_state
 from simulator.physics.drone_state import DroneState
 
 log = logging.getLogger(__name__)
@@ -70,21 +69,14 @@ class ManualControl(CommandSource):
         self._last_mouse_x = None
         self._last_mouse_y = None
 
-        # Start keyboard listener in background
-        self._listener = keyboard.Listener(
-            on_press=self._on_press,
-            on_release=self._on_release
-        )
-        self._listener.daemon = True
-        self._listener.start()
-        
-        # Start mouse listener
-        self._mouse_listener = mouse.Listener(
-            on_move=self._on_mouse_move,
-            on_click=self._on_mouse_click
-        )
-        self._mouse_listener.daemon = True
-        self._mouse_listener.start()
+        # Polled keyboard state. Deliberately NOT a pynput global hook: the
+        # WH_KEYBOARD_LL hook starves the OpenCV preview window's message queue
+        # while a key is held, which froze the picture at a full 30 FPS.
+        # See simulator/control/key_state.py.
+        self._key_state = make_key_state()
+
+        # Mouse look is served by cv2.setMouseCallback (see self.on_mouse),
+        # registered by main.py — also hook-free.
 
         # Gamepad (optional)
         self._gamepad = None
@@ -103,51 +95,59 @@ class ManualControl(CommandSource):
                 )
 
     def on_mouse(self, event, x, y, flags, param):
-        """OpenCV mouse callback (no longer used)"""
-        pass
+        """OpenCV mouse callback — drag with the left button to look around.
 
-    def _on_mouse_click(self, x, y, button, pressed):
-        if button == mouse.Button.left:
+        Runs on the HighGUI thread during cv2.waitKey, so it touches the same
+        state under self._lock.
+        """
+        import cv2
+
+        if event == cv2.EVENT_LBUTTONDOWN:
             with self._lock:
-                self._mouse_pressed = pressed
-                if not pressed:
-                    self._last_mouse_x = None
-                    self._last_mouse_y = None
-                else:
-                    self._last_mouse_x = x
-                    self._last_mouse_y = y
-
-    def _on_mouse_move(self, x, y):
-        with self._lock:
-            if self._mouse_pressed and self._last_mouse_x is not None and self._last_mouse_y is not None:
-                dx = x - self._last_mouse_x
-                dy = y - self._last_mouse_y
-                # Ignore huge jumps
-                if abs(dx) < 100 and abs(dy) < 100:
-                    self.target_yaw -= dx * 0.005
-                    self.target_pitch += dy * 0.005
-                    # Clamp pitch to prevent looking fully upside down or looping
-                    self.target_pitch = max(-math.pi/2.1, min(math.pi/2.1, self.target_pitch))
+                self._mouse_pressed = True
                 self._last_mouse_x = x
                 self._last_mouse_y = y
+            return
 
-    def _on_press(self, key):
+        if event in (cv2.EVENT_LBUTTONUP, cv2.EVENT_RBUTTONDOWN):
+            with self._lock:
+                self._mouse_pressed = False
+                self._last_mouse_x = None
+                self._last_mouse_y = None
+            return
+
+        if event != cv2.EVENT_MOUSEMOVE:
+            return
+
         with self._lock:
-            self._keys_pressed.add(self._get_key_name(key))
+            if (
+                not self._mouse_pressed
+                or self._last_mouse_x is None
+                or self._last_mouse_y is None
+            ):
+                return
+            dx = x - self._last_mouse_x
+            dy = y - self._last_mouse_y
+            # Ignore huge jumps (window resize, pointer warp)
+            if abs(dx) < 100 and abs(dy) < 100:
+                self.target_yaw -= dx * 0.005
+                self.target_pitch += dy * 0.005
+                # Clamp pitch to prevent looking fully upside down or looping
+                self.target_pitch = max(
+                    -math.pi / 2.1, min(math.pi / 2.1, self.target_pitch)
+                )
+            self._last_mouse_x = x
+            self._last_mouse_y = y
 
-    def _on_release(self, key):
-        key_name = self._get_key_name(key)
-        with self._lock:
-            if key_name in self._keys_pressed:
-                self._keys_pressed.remove(key_name)
-            if key == keyboard.Key.esc:
-                self._finished = True
-
-    def _get_key_name(self, key):
-        try:
-            return key.char.lower()
-        except AttributeError:
-            return key.name
+    def _poll_keys(self) -> set:
+        """Read the current key set and handle ESC. Called once per frame."""
+        keys = self._key_state.pressed()
+        # Kept as an attribute purely so external code (diagnostics in main.py)
+        # can inspect it; it is no longer written from another thread.
+        self._keys_pressed = keys
+        if "esc" in keys:
+            self._finished = True
+        return keys
 
     # ------------------------------------------------------------------
     # get_command — dispatches to arcade or realistic path
@@ -168,8 +168,8 @@ class ManualControl(CommandSource):
     def _get_command_arcade(self, state: DroneState, dt: float) -> CommandVector:
         cmd = CommandVector()
         
+        keys = self._poll_keys()
         with self._lock:
-            keys = self._keys_pressed.copy()
             target_yaw = self.target_yaw
             target_pitch = self.target_pitch
 
@@ -272,8 +272,7 @@ class ManualControl(CommandSource):
             self._finished = True
 
         # ---- Also read keyboard as fallback ----
-        with self._lock:
-            keys = self._keys_pressed.copy()
+        keys = self._poll_keys()
 
         kb_pitch = 0.0
         kb_roll = 0.0
