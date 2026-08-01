@@ -11,9 +11,17 @@ CalibrationLogger — генерує calibration.json, сумісний із Top
    який DatabaseBuilder покладе у цей слот.
 
 2. 5 ОПОРНИХ ТОЧОК: центр + 4 точки, розкидані по кадру (20%/80%).
-   GPS кожної точки обчислюється точною проєкцією H1 → RMSE LSQ-фіту чесно
-   відображає нелінійність гомографії, а локалізатор отримує повні дані
-   для LOO-QA та інтерполяції.
+   GPS кожної точки береться з ТІЄЇ САМОЇ трансформації, якою рендериться
+   кадр — включно з parallax-зміщенням по рельєфу (simulator.terrain.parallax).
+   RMSE LSQ-фіту тоді чесно відображає нелінійність, а локалізатор отримує
+   повні дані для LOO-QA та інтерполяції.
+
+   ВАЖЛИВО (аудит 2026-08-01): раніше точки бралися з гомографії ПЛОЩИНИ Z=0,
+   тоді як рендер зміщує пікселі за висотою рельєфу. Похибка нульова в надирі
+   й росте як r·h_rel/altitude — при рельєфі 178 м і висоті 1000 м це ~19 м у
+   середині кадру й ~68 м у куті. Усі 5 точок ділили одне й те саме хибне
+   припущення, тому власний RMSE якоря лишався ~1e-06 і нічого не показував,
+   а pose graph отримував якорі, що суперечать і зображенню, і один одному.
 
 3. ЯКОРІ НА ЗМІНАХ НАПРЯМКУ РУХУ. Кандидат буферизується для КОЖНОГО слота,
    фінальний відбір — у close():
@@ -37,6 +45,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from simulator.physics.drone_state import DroneState
+from simulator.terrain.parallax import apply_parallax, elevation_sampler
 
 if TYPE_CHECKING:  # rasterio потрібен лише реальній мапі, не логеру
     from simulator.terrain.orthophoto_map import OrthophotoMap
@@ -81,6 +90,7 @@ class CalibrationLogger:
         self._candidates: list[dict] = []
         self._frame_size: tuple[int, int] | None = None
         self._skipped_bad_h = 0
+        self._warned_terrain = False
 
     # ── Внутрішнє ────────────────────────────────────────────────────────────
 
@@ -228,6 +238,11 @@ class CalibrationLogger:
         pts_local_hom = (H1_inv @ pts_hom.T).T
         pts_local = pts_local_hom[:, :2] / pts_local_hom[:, 2:]
 
+        # Рельєф: зміщуємо точки тим самим правилом, що й рендер (див. модуль
+        # simulator.terrain.parallax). Без рельєфу — тотожність, тож поведінка
+        # на пласких мапах побітово незмінна.
+        pts_local = self._apply_terrain(pts_local, state)
+
         # local → Web Mercator (метри) та local → GPS (точна проєкція)
         pts_mercator = pts_local + np.array(
             [self.ortho_map._center_x, self.ortho_map._center_y]
@@ -272,6 +287,51 @@ class CalibrationLogger:
             }
         )
         return True
+
+    def _apply_terrain(self, pts_local: np.ndarray, state: DroneState) -> np.ndarray:
+        """Переносить точки з площини Z=0 на поверхню рельєфу.
+
+        Повертає вхід без змін, якщо мапа без DEM або не вміє в піксельні
+        координати (мінімальні двійники в тестах) — пласка сцена лишається
+        точною за побудовою.
+        """
+        elevation = getattr(self.ortho_map, "elevation", None)
+        if elevation is None:
+            return pts_local
+        if not hasattr(self.ortho_map, "local_to_pixel"):
+            return pts_local
+
+        try:
+            cols, rows = [], []
+            for x, y in pts_local:
+                c, r = self.ortho_map.local_to_pixel(float(x), float(y))
+                cols.append(c)
+                rows.append(r)
+            drone_col, drone_row = self.ortho_map.local_to_pixel(
+                float(state.position[0]), float(state.position[1])
+            )
+            sampler = elevation_sampler(
+                elevation, self.ortho_map.width, self.ortho_map.height
+            )
+            u, v = apply_parallax(
+                np.asarray(cols, dtype=np.float64),
+                np.asarray(rows, dtype=np.float64),
+                drone_col,
+                drone_row,
+                float(state.altitude),
+                sampler,
+                float(getattr(self.ortho_map, "base_elevation", 0.0)),
+            )
+            return np.array(
+                [self.ortho_map.pixel_to_local(float(cu), float(cv)) for cu, cv in zip(u, v)],
+                dtype=np.float64,
+            )
+        except Exception as e:  # noqa: BLE001 — краще плаский якір, ніж жодного
+            if not self._warned_terrain:
+                print(f"[CalibrationLogger] WARN: terrain correction unavailable ({e}) — "
+                      f"anchors fall back to the flat Z=0 plane")
+                self._warned_terrain = True
+            return pts_local
 
     def dump_ground_truth(self, path: str, fps: float = 30.0) -> None:
         """Скидає GT ПО КОЖНОМУ слоту (Етап 0.2) для validate_vs_telemetry.py.

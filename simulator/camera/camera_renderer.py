@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 
 from simulator.camera.camera_model import CameraModel
+from simulator.terrain.parallax import apply_parallax, passes_for_altitude
 from simulator.terrain.orthophoto_map import OrthophotoMap
 from simulator.physics.drone_state import DroneState
 
@@ -187,10 +188,17 @@ class CameraRenderer:
         return frame
 
     def _compute_homography(self, R_world_to_cam, T_cam, K):
-        """Compute the final homography for a given intrinsic matrix K."""
+        """Compute the final homography for a given intrinsic matrix K.
+
+        NOTE: this must NOT touch ``self.last_P``. The CPU path calls it twice —
+        full-res then half-res — so assigning here left ``last_P`` holding the
+        HALF-resolution projection matrix. CalibrationLogger builds anchors from
+        ``last_P`` with FULL-resolution pixel coordinates, so every anchor
+        recorded without CuPy came out at half scale. The caller assigns
+        ``last_P`` explicitly from the full-res matrix.
+        """
         # 3. Projection Matrix P = K [R | T]
         P = K @ np.hstack((R_world_to_cam, T_cam.reshape(3, 1)))
-        self.last_P = P
         
         # 4. Homography H1 mapping World Ground (X, Y, Z=0) to Camera Pixels
         # Ground points are [X, Y, 0, 1]^T, so we take cols 0, 1, 3 of P
@@ -254,34 +262,33 @@ class CameraRenderer:
         u_map /= w_div
         v_map /= w_div
         
-        # Parallax Displacement Mapping (3D Terrain) — adaptive passes
+        # Parallax Displacement Mapping (3D Terrain) — adaptive passes.
+        # The formula itself lives in simulator.terrain.parallax so that
+        # CalibrationLogger displaces its five anchor points by EXACTLY the same
+        # rule; anchors used to assume the flat Z=0 plane and silently disagreed
+        # with the rendered image by r*h_rel/altitude (audit 2026-08-01).
         if self.gpu_elevation is not None:
             drone_col, drone_row = self.ortho_map.local_to_pixel(lx, ly)
-            
-            u_0 = u_map.copy()
-            v_0 = v_map.copy()
-            
-            # Adaptive: fewer passes at high altitude where parallax effect is minimal
-            num_passes = 1 if altitude > 200.0 else 3
-            
-            for _ in range(num_passes):
-                elev_h, elev_w = self.gpu_elevation.shape
-                coords = cp.stack([
-                    v_map * (elev_h / self.ortho_map.height),
-                    u_map * (elev_w / self.ortho_map.width)
-                ], axis=0)
-                h_abs = cupyx.scipy.ndimage.map_coordinates(
+            elev_h, elev_w = self.gpu_elevation.shape
+            row_scale = elev_h / self.ortho_map.height
+            col_scale = elev_w / self.ortho_map.width
+
+            def _sample_h_abs(u, v):
+                coords = cp.stack([v * row_scale, u * col_scale], axis=0)
+                return cupyx.scipy.ndimage.map_coordinates(
                     self.gpu_elevation, coords, order=1, mode='nearest'
                 )
-                # Height above the Z=0 base plane
-                h_rel = h_abs - self.ortho_map.base_elevation
-                
-                # Avoid division by zero
-                frac = h_rel / max(altitude, 10.0)
-                
-                # Shift coordinates towards the drone
-                u_map = u_0 - frac * (u_0 - drone_col)
-                v_map = v_0 - frac * (v_0 - drone_row)
+
+            u_map, v_map = apply_parallax(
+                u_map.copy(),
+                v_map.copy(),
+                drone_col,
+                drone_row,
+                altitude,
+                _sample_h_abs,
+                self.ortho_map.base_elevation,
+                num_passes=passes_for_altitude(altitude),
+            )
         
         coords = cp.stack([v_map, u_map], axis=0)
         
