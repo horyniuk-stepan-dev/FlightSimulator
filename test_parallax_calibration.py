@@ -170,8 +170,26 @@ def test_logger_terrain():
           f"стільки ж, а його власний RMSE лишався {flat_rmse:.1e} м")
 
 
+def test_hillshade_generation():
+    from simulator.terrain.orthophoto_map import OrthophotoMap
+    # Create mock map structure
+    m = OrthophotoMap.__new__(OrthophotoMap)
+    m.elevation = np.zeros((100, 100), dtype=np.float32)
+    # Slope terrain: rising 100m west to east
+    m.elevation += np.linspace(0, 100, 100, dtype=np.float32)
+    m._bounds = type("Bounds", (), {"left": 0.0, "right": 1000.0, "top": 1000.0, "bottom": 0.0})()
+
+    hs = m.generate_hillshade(azimuth_deg=315.0, altitude_deg=45.0, z_factor=1.0)
+    assert hs is not None
+    assert hs.shape == (100, 100)
+    assert np.all((hs >= 0.0) & (hs <= 1.0))
+    print("[4] OK: 3D hillshade generation computed valid illumination values")
+
+
 if __name__ == "__main__":
     test_apply_parallax_geometry()
     test_bilinear_matches_scipy()
     test_logger_terrain()
+    test_hillshade_generation()
     print("\n=== ALL TESTS PASSED ===")
+

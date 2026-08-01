@@ -24,3 +24,5 @@ Main_project_files_all_merged_new.py
 logs/app.log
 logs/metrics.jsonl
 models/yolo11n-seg.pt
+test_frame.png
+ground_truth.json

@@ -79,6 +79,75 @@ class OrthophotoMap:
         if self.elevation is not None:
             print(f"[OrthophotoMap] Elevation loaded. Min: {np.min(self.elevation):.1f}m, Max: {np.max(self.elevation):.1f}m")
 
+    def generate_hillshade(
+        self,
+        azimuth_deg: float = 315.0,
+        altitude_deg: float = 45.0,
+        z_factor: float = 2.0,
+    ) -> np.ndarray | None:
+        """
+        Compute hillshade illumination (0.0 to 1.0) from elevation raster.
+
+        Args:
+            azimuth_deg: Light source direction in degrees (315° = NW standard).
+            altitude_deg: Light source angle above horizon (45° standard).
+            z_factor: Vertical exaggeration factor for terrain slope.
+
+        Returns:
+            Hillshade map as float32 array [0.0, 1.0] matching elevation dimensions,
+            or None if elevation data is missing.
+        """
+        if self.elevation is None:
+            return None
+
+        azimuth_rad = np.radians(360.0 - azimuth_deg + 90.0)
+        altitude_rad = np.radians(altitude_deg)
+
+        elev_h, elev_w = self.elevation.shape[:2]
+        total_w_m, total_h_m = self.get_size_meters()
+        dx_m = total_w_m / max(elev_w, 1)
+        dy_m = total_h_m / max(elev_h, 1)
+
+        dy, dx = np.gradient(self.elevation * z_factor)
+        dz_dx = dx / dx_m
+        dz_dy = -dy / dy_m
+
+        slope = np.arctan(np.hypot(dz_dx, dz_dy))
+        aspect = np.arctan2(dz_dy, -dz_dx)
+
+        shaded = np.sin(altitude_rad) * np.cos(slope) + np.cos(altitude_rad) * np.sin(slope) * np.cos(azimuth_rad - aspect)
+        return np.clip(shaded, 0.0, 1.0).astype(np.float32)
+
+    def apply_hillshade(
+        self,
+        blend_factor: float = 0.35,
+        azimuth_deg: float = 315.0,
+        altitude_deg: float = 45.0,
+        z_factor: float = 2.0,
+    ) -> None:
+        """
+        Blend 3D hillshade illumination into self.image to enhance terrain relief.
+
+        Args:
+            blend_factor: Shading intensity [0.0 = off, 1.0 = full].
+            azimuth_deg: Light source direction angle.
+            altitude_deg: Light source altitude angle.
+            z_factor: Exaggeration multiplier for slopes.
+        """
+        hillshade = self.generate_hillshade(azimuth_deg, altitude_deg, z_factor)
+        if hillshade is None:
+            return
+
+        h, w = self.image.shape[:2]
+        hillshade_resized = cv2.resize(hillshade, (w, h), interpolation=cv2.INTER_LINEAR)
+        hillshade_bgr = np.dstack([hillshade_resized] * 3)
+
+        shade_multiplier = 0.5 + 0.8 * hillshade_bgr
+        blended = self.image.astype(np.float32) * ((1.0 - blend_factor) + blend_factor * shade_multiplier)
+        self.image = np.clip(blended, 0.0, 255.0).astype(np.uint8)
+        self.image = np.ascontiguousarray(self.image)
+        print(f"[OrthophotoMap] Applied 3D Hillshade relief (blend={blend_factor:.2f}, z_factor={z_factor:.1f})")
+
     @property
     def height(self) -> int:
         return self.image.shape[0]

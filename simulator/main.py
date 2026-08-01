@@ -139,6 +139,13 @@ def parse_args() -> SimulatorConfig:
         help="Do not open the live preview window (headless). "
         "Не показувати вікно з польотом дрона.",
     )
+    parser.add_argument(
+        "--no-hillshade",
+        dest="enable_hillshade",
+        action="store_false",
+        help="Disable 3D hillshade shading from elevation raster. "
+        "Вимкнути світлотіньове 3D-рельефування.",
+    )
 
     # File overrides
     parser.add_argument(
@@ -257,6 +264,9 @@ def main():
         )
 
     ortho_map = OrthophotoMap(geotiff_path, elevation_path=elevation_path)
+    if cfg.enable_hillshade and ortho_map.elevation is not None:
+        ortho_map.apply_hillshade(blend_factor=0.35, z_factor=2.0)
+
     bounds = ortho_map.get_bounds_local()
     print(f"Map Bounds (local meters): {bounds}")
 
@@ -467,6 +477,10 @@ def main():
             # HUD overlay, so skipping the HUD here costs the video nothing.
             _t1 = time.perf_counter()
             if sinks:
+                if any(sink.is_closed() for sink in sinks):
+                    print("\nWindow closed by user.")
+                    break
+
                 if offline:
                     hud_frame = raw_frame
                 else:
@@ -511,15 +525,21 @@ def main():
                         f"yaw={math.degrees(state.yaw):6.1f}  keys={_keys}"
                     )
                 if key == 27:  # ESC
+                    print("\nESC pressed. Exiting...")
                     break
 
                 # Check if user closed the window via 'X' button
                 if any(sink.is_closed() for sink in sinks):
+                    print("\nWindow closed by user.")
                     break
 
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
     finally:
+        for sink in sinks:
+            if hasattr(sink, "cleanup"):
+                sink.cleanup()
+        cv2.destroyAllWindows()
         telemetry_logger.close()
         if calib_logger:
             calib_logger.close()

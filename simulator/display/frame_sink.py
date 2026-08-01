@@ -26,20 +26,34 @@ class DisplaySink(FrameSink):
     
     def __init__(self, window_name: str = "Drone Simulator"):
         self.window_name = window_name
+        self._closed = False
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         
     def consume(self, frame: np.ndarray) -> None:
-        cv2.imshow(self.window_name, frame)
+        if self._closed:
+            return
+        try:
+            cv2.imshow(self.window_name, frame)
+        except Exception:
+            self._closed = True
         
     def cleanup(self) -> None:
+        self._closed = True
         try:
             cv2.destroyWindow(self.window_name)
         except Exception:
             pass
 
     def is_closed(self) -> bool:
-        # Check if the user clicked the 'X' button on the window
-        try:
-            return cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) < 1
-        except Exception:
+        if self._closed:
             return True
+        try:
+            vis = cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE)
+            auto = cv2.getWindowProperty(self.window_name, cv2.WND_PROP_AUTOSIZE)
+            if vis < 1 or auto < 0:
+                self._closed = True
+                return True
+        except Exception:
+            self._closed = True
+            return True
+        return False

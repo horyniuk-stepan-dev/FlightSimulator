@@ -59,6 +59,7 @@ class SimulatorConfig:
     # Render
     target_fps: int = 30
     physics_substeps: int = 20  # Physics steps per render frame
+    enable_hillshade: bool = True  # Apply 3D hillshade shading from elevation raster
 
     # Performance / headless
     # fast: run the loop at maximum speed (no real-time throttle). The recorded
