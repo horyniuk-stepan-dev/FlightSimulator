@@ -126,11 +126,27 @@ def download_tiles(
     zoom: int = 19,
     cache_dir: str = ".tile_cache",
     provider=None,
+    map_date: str = "",
 ) -> str:
-    """Download satellite tiles."""
+    """
+    Download satellite tiles.
+
+    map_date: епоха знімків Esri Wayback ("YYYY", "YYYY-MM" або "YYYY-MM-DD").
+    Береться найновіший реліз, опублікований не пізніше цієї дати. Порожньо →
+    поточний Esri.WorldImagery. Кеш для кожної епохи окремий.
+    """
+    prefix = "terrain"
+    if map_date:
+        from simulator.terrain.wayback import resolve_release
+
+        release = resolve_release(map_date)
+        print(f"[TileLoader] Wayback epoch: {release.title}")
+        provider = release.tile_url
+        prefix = f"terrain_wb{release.release_id}"
+
     if provider is None:
         provider = cx.providers.Esri.WorldImagery
-    return _download_raster(lat_min, lon_min, lat_max, lon_max, zoom, cache_dir, "terrain", provider)
+    return _download_raster(lat_min, lon_min, lat_max, lon_max, zoom, cache_dir, prefix, provider)
 
 
 def download_elevation(

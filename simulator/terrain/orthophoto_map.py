@@ -148,6 +148,22 @@ class OrthophotoMap:
         self.image = np.ascontiguousarray(self.image)
         print(f"[OrthophotoMap] Applied 3D Hillshade relief (blend={blend_factor:.2f}, z_factor={z_factor:.1f})")
 
+    def apply_season(self, season: str, strength: float = 0.7) -> None:
+        """
+        Apply a synthetic seasonal look to self.image (see terrain/season.py).
+
+        Args:
+            season: "winter" (or "" / "summer" / "none" for no change).
+            strength: 0.0 = off, 1.0 = maximum.
+        """
+        from simulator.terrain.season import apply_season as _apply
+
+        key = (season or "").strip().lower()
+        if key in ("", "none", "summer"):
+            return
+        self.image = np.ascontiguousarray(_apply(self.image, key, strength=strength))
+        print(f"[OrthophotoMap] Applied synthetic season '{key}' (strength={strength:.2f})")
+
     @property
     def height(self) -> int:
         return self.image.shape[0]

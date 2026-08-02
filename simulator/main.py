@@ -60,6 +60,40 @@ def parse_args() -> SimulatorConfig:
         help="Maximum longitude (East)",
     )
     parser.add_argument("--zoom", type=int, default=17, help="Map tile zoom level")
+    parser.add_argument(
+        "--season",
+        type=str,
+        choices=["", "winter"],
+        default="",
+        help="Синтетичний сезон поверх ортофото. winter = leaf-off + "
+        "десатурація + сніг на гладких ділянках + зимове світло. "
+        "Геометрія сцени не змінюється, тільки фотометрика",
+    )
+    parser.add_argument(
+        "--season-strength",
+        dest="season_strength",
+        type=float,
+        default=0.85,
+        help="Сила сезонного фільтра [0.0 — вимкнено, 1.0 — максимум]",
+    )
+    parser.add_argument(
+        "--season-preview",
+        dest="season_preview",
+        type=str,
+        default="",
+        help="Зберегти зменшене прев'ю обробленої карти в цей PNG і вийти "
+        "(щоб підібрати --season-strength без запису польоту)",
+    )
+    parser.add_argument(
+        "--map-date",
+        dest="map_date",
+        type=str,
+        default="",
+        help="Епоха супутникових знімків Esri Wayback: YYYY, YYYY-MM або "
+        "YYYY-MM-DD (береться найновіший реліз не пізніше цієї дати). "
+        "Список реально різних епох для точки: "
+        "python -m simulator.terrain.wayback --lat <LAT> --lon <LON>",
+    )
 
     # Flight params
     parser.add_argument(
@@ -253,6 +287,7 @@ def main():
             lat_max=cfg.lat_max,
             lon_max=cfg.lon_max,
             zoom=cfg.zoom,
+            map_date=cfg.map_date,
         )
 
         elevation_path = download_elevation(
@@ -266,6 +301,20 @@ def main():
     ortho_map = OrthophotoMap(geotiff_path, elevation_path=elevation_path)
     if cfg.enable_hillshade and ortho_map.elevation is not None:
         ortho_map.apply_hillshade(blend_factor=0.35, z_factor=2.0)
+
+    if cfg.season:
+        ortho_map.apply_season(cfg.season, strength=cfg.season_strength)
+
+    if cfg.season_preview:
+        import cv2 as _cv2
+
+        _h, _w = ortho_map.image.shape[:2]
+        _scale = min(1.0, 1600.0 / max(_h, _w))
+        _prev = _cv2.resize(ortho_map.image, (int(_w * _scale), int(_h * _scale)),
+                            interpolation=_cv2.INTER_AREA)
+        _cv2.imwrite(cfg.season_preview, _prev)
+        print(f"Прев'ю карти збережено: {cfg.season_preview} ({_prev.shape[1]}x{_prev.shape[0]})")
+        return
 
     bounds = ortho_map.get_bounds_local()
     print(f"Map Bounds (local meters): {bounds}")

@@ -41,6 +41,17 @@ class SimulatorConfig:
     lon_max: float = 30.5690
     zoom: int = 17  # Reduced zoom to keep VRAM usage normal for a large map
     geotiff_path: str = ""  # If provided, skip tile download
+    # Епоха супутникових знімків (Esri Wayback): "YYYY", "YYYY-MM" або
+    # "YYYY-MM-DD". Порожньо → поточний Esri.WorldImagery (стара поведінка).
+    # Дозволяє зняти той самий район у різні періоди (напр. літо vs зима).
+    map_date: str = ""
+    # Синтетичний сезон поверх ортофото: "" (як є) або "winter".
+    # Справжньої зими в Esri World Imagery немає — мозаїка навмисно збирається
+    # з безсніжних leaf-on знімків, тому зимовий вигляд синтезується фільтром.
+    season: str = ""
+    season_strength: float = 0.85
+    # Якщо задано — зберегти зменшене прев'ю обробленої карти в цей PNG і вийти
+    season_preview: str = ""
 
     # Flight parameters
     altitude_m: float = 1000.0
