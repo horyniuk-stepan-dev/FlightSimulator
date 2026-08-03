@@ -104,6 +104,13 @@ class SimulatorConfig:
     anchor_turn_rate_deg: float = 3.0
     anchor_spacing_slots: int = 15
     anchor_max_spacing_slots: int = 60
+    # Стратегія відбору кадрів — МУСИТЬ збігатися з database.keyframe_* системи
+    # локалізації. "overlap": якорі ставляться лише на слоти, які локалізатор
+    # залишить keyframe-ами (інакше він снепить їх сам, а при порозі 0.5 снап
+    # може бути на півкадру руху). "step" — стара поведінка.
+    keyframe_criterion: str = "overlap"
+    keyframe_max_overlap: float = 0.5
+    keyframe_max_gap_frames: int = 60
     # Heading-hold (градуси): сталий курс камери на весь політ, як у гімбала
     # реального дрона. None → ніс слідує за вектором швидкості (стара поведінка)
     heading_hold_deg: float | None = None

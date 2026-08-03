@@ -6,7 +6,11 @@
    кладе у слоти БД (range(0, total_frames, frame_step), слот = кадр // step).
 2. Відбір якорів: якорі ставляться на межах змін напрямку руху (розворотах),
    на першому/останньому слоті, а прямі ділянки добиваються fill-якорями.
-3. Формат calibration.json = v2.3 системи локалізації (det<0, 5 точок, QA).
+3. Формат calibration.json = v2.4 системи локалізації (det<0, 5 точок, QA,
+   блок keyframe_selection зі стратегією відбору кадрів).
+5. Якорі лежать РІВНО на слотах, які локалізатор залишить keyframe-ами
+   (criterion=overlap) — інакше пропагація снепить їх сама або падає на
+   колізії двох якорів в одному слоті.
 4. Точність: афінна матриця якоря відтворює ground-truth позицію центру кадру.
 
 Запуск: python test_calibration_logger.py  (потрібен лише numpy)
@@ -121,10 +125,13 @@ def main():
     print(f"[1] OK: семплінг збігається з DatabaseBuilder "
           f"({len(db_frames)} слотів із {total} кадрів, step={FRAME_STEP})")
 
-    # [2] Формат файлу v2.3
+    # [2] Формат файлу v2.4 (2.3 + блок keyframe_selection)
     with open(calib_path, encoding="utf-8") as f:
         data = json.load(f)
-    assert data["version"] == "2.3"
+    assert data["version"] == "2.4"
+    ks = data["keyframe_selection"]
+    assert ks["criterion"] in ("overlap", "step")
+    assert ks["frame_step"] == FRAME_STEP
     assert data["projection"]["mode"] == "WEB_MERCATOR"
     assert data["frame_size"] == [W, H]
     anchors = data["anchors"]
@@ -139,7 +146,7 @@ def main():
         qa = a["qa_data"]
         assert len(qa["points_2d"]) == 5 and len(qa["points_gps"]) == 5
         assert qa["rmse_m"] < 1.0, f"rmse too high: {qa['rmse_m']}"
-    print(f"[2] OK: calibration.json v2.3, {len(anchors)} якорів, всі det<0, RMSE<1м")
+    print(f"[2] OK: calibration.json v2.4, {len(anchors)} якорів, всі det<0, RMSE<1м")
 
     # [3] Якорі на межах розворотів
     reasons = {a["frame_id"]: a["qa_data"]["notes"] for a in anchors}

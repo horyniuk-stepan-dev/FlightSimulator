@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from simulator.physics.drone_state import DroneState
+from simulator.physics.keyframe_predictor import predict_keyframe_slots
 from simulator.terrain.parallax import apply_parallax, elevation_sampler
 
 if TYPE_CHECKING:  # rasterio потрібен лише реальній мапі, не логеру
@@ -61,6 +62,9 @@ class CalibrationLogger:
         min_anchor_spacing_slots: int = 15,
         max_anchor_spacing_slots: int = 60,
         min_speed_m_s: float = 1.0,
+        keyframe_criterion: str = "overlap",
+        keyframe_max_overlap: float = 0.5,
+        keyframe_max_gap_frames: int = 60,
     ):
         """
         Args:
@@ -75,6 +79,12 @@ class CalibrationLogger:
                 ділянки добиваються проміжними якорями
             min_speed_m_s: нижче цієї швидкості напрямок руху невизначений —
                 використовується yaw
+            keyframe_criterion: "overlap" — якорі ставляться ЛИШЕ на слоти, які
+                локалізатор залишить keyframe-ами (database.keyframe_criterion
+                там мусить бути таким самим); "step" — стара поведінка, якір
+                може лягти на будь-який слот
+            keyframe_max_overlap: МУСИТЬ збігатися з database.keyframe_max_overlap
+            keyframe_max_gap_frames: МУСИТЬ збігатися з database.keyframe_max_gap_frames
         """
         self.output_file = output_file
         self.ortho_map = ortho_map
@@ -85,6 +95,9 @@ class CalibrationLogger:
             self.min_spacing_slots, int(max_anchor_spacing_slots)
         )
         self.min_speed = float(min_speed_m_s)
+        self.keyframe_criterion = str(keyframe_criterion)
+        self.keyframe_max_overlap = float(keyframe_max_overlap)
+        self.keyframe_max_gap_frames = int(keyframe_max_gap_frames)
 
         # Кандидати якорів: по одному на КОЖЕН слот БД з валідною H1
         self._candidates: list[dict] = []
@@ -333,6 +346,98 @@ class CalibrationLogger:
                 self._warned_terrain = True
             return pts_local
 
+    # ── Узгодження з keyframe-селекцією локалізатора ─────────────────────────
+
+    #: Що зберігати першим при колізії двох якорів на одному keyframe.
+    #: Менше число = вищий пріоритет. first/last задають clamp-діапазон
+    #: інтерполятора, межі розвороту — вузли, де траєкторія ламається.
+    _REASON_PRIORITY = {
+        "first": 0,
+        "last": 0,
+        "turn_start": 1,
+        "turn_end": 1,
+        "turn_apex": 2,
+        "straight_fill": 3,
+    }
+
+    def _predicted_keyframe_indices(self) -> list[int]:
+        """Індекси кандидатів, які локалізатор залишить keyframe-ами."""
+        if self.keyframe_criterion != "overlap" or not self._candidates:
+            return list(range(len(self._candidates)))
+        if not self._frame_size:
+            return list(range(len(self._candidates)))
+        w, h = self._frame_size
+        return predict_keyframe_slots(
+            [c["M"] for c in self._candidates],
+            w,
+            h,
+            max_overlap=self.keyframe_max_overlap,
+            max_gap_frames=self.keyframe_max_gap_frames,
+        )
+
+    def _restrict_to_keyframes(self, selected: dict) -> dict:
+        """Пересуває відібрані якорі на найближчі передбачені keyframe-слоти.
+
+        Причина: пропагація локалізатора будує вузли графа лише на слотах із
+        фічами. Якір на не-keyframe слоті вона приснеплює до найближчого
+        keyframe сама — але при overlap-порозі 0.5 «найближчий» може бути за
+        півкадру руху, і зсув мовчки псує калібрацію. Краще зробити снап тут,
+        де ще відомо, ЯКИЙ слот був потрібен, і зберегти афінну саме того
+        keyframe-а, а не чужу матрицю під чужим номером.
+
+        Колізії (два якорі на один keyframe) розв'язуються тут же: локалізатор
+        на такому дублікаті зупиняє пропагацію з помилкою.
+        """
+        if self.keyframe_criterion != "overlap" or not selected:
+            return selected
+
+        kf = self._predicted_keyframe_indices()
+        if not kf:
+            return selected
+
+        kf_arr = np.asarray(kf, dtype=np.int64)
+        kf_set = set(kf)
+        moved = 0
+        dropped = 0
+        out: dict[int, str] = {}
+        for idx in sorted(selected, key=lambda i: (self._REASON_PRIORITY.get(selected[i], 99), i)):
+            reason = selected[idx]
+            if idx in kf_set:
+                target = idx
+            else:
+                target = int(kf_arr[np.argmin(np.abs(kf_arr - idx))])
+                moved += 1
+            if target in out:
+                # Колізію розв'язує пріоритет причини, а не порядок слотів:
+                # межі запису й межі розвороту інформативніші за апекс і за
+                # добивання прямих ділянок.
+                print(
+                    f"[CalibrationLogger] WARN: anchor '{reason}' (slot "
+                    f"{self._candidates[idx]['slot']}) collapses onto keyframe slot "
+                    f"{self._candidates[target]['slot']}, already taken by "
+                    f"'{out[target]}' — dropped"
+                )
+                dropped += 1
+                continue
+            out[target] = reason if target == idx else f"{reason}+kf-snap"
+
+        if dropped:
+            print(
+                f"[CalibrationLogger] {dropped} anchor(s) dropped as duplicates. Причина —"
+                f" keyframe-и рідші за якорі розворотів; якщо це вадить точності,"
+                f" підніміть keyframe_max_overlap в ОБОХ проєктах (менш агресивний"
+                f" відбір → щільніші keyframe-и)."
+            )
+
+        if moved:
+            print(
+                f"[CalibrationLogger] {moved}/{len(selected)} anchors moved onto predicted "
+                f"keyframes (overlap<={self.keyframe_max_overlap}, "
+                f"max_gap={self.keyframe_max_gap_frames}); {len(kf)}/{len(self._candidates)} "
+                f"slots are keyframes"
+            )
+        return out
+
     def dump_ground_truth(self, path: str, fps: float = 30.0) -> None:
         """Скидає GT ПО КОЖНОМУ слоту (Етап 0.2) для validate_vs_telemetry.py.
 
@@ -346,12 +451,14 @@ class CalibrationLogger:
             print("[CalibrationLogger] No candidates — ground_truth.json not written.")
             return
 
-        selected = self.select_anchor_indices(
-            slots=[c["slot"] for c in self._candidates],
-            headings_rad=[c["heading"] for c in self._candidates],
-            turn_rate_deg_per_slot=self.turn_rate_deg,
-            min_spacing_slots=self.min_spacing_slots,
-            max_spacing_slots=self.max_spacing_slots,
+        selected = self._restrict_to_keyframes(
+            self.select_anchor_indices(
+                slots=[c["slot"] for c in self._candidates],
+                headings_rad=[c["heading"] for c in self._candidates],
+                turn_rate_deg_per_slot=self.turn_rate_deg,
+                min_spacing_slots=self.min_spacing_slots,
+                max_spacing_slots=self.max_spacing_slots,
+            )
         )
 
         if self._frame_size:
@@ -421,12 +528,14 @@ class CalibrationLogger:
             print("[CalibrationLogger] No anchor candidates recorded, skipping file creation.")
             return
 
-        selected = self.select_anchor_indices(
-            slots=[c["slot"] for c in self._candidates],
-            headings_rad=[c["heading"] for c in self._candidates],
-            turn_rate_deg_per_slot=self.turn_rate_deg,
-            min_spacing_slots=self.min_spacing_slots,
-            max_spacing_slots=self.max_spacing_slots,
+        selected = self._restrict_to_keyframes(
+            self.select_anchor_indices(
+                slots=[c["slot"] for c in self._candidates],
+                headings_rad=[c["heading"] for c in self._candidates],
+                turn_rate_deg_per_slot=self.turn_rate_deg,
+                min_spacing_slots=self.min_spacing_slots,
+                max_spacing_slots=self.max_spacing_slots,
+            )
         )
 
         now_iso = datetime.datetime.now().isoformat()
@@ -462,10 +571,20 @@ class CalibrationLogger:
             )
 
         data = {
-            "version": "2.3",
+            # 2.4: додано блок keyframe_selection. Стратегія відбору кадрів
+            # тепер частина контракту між проєктами — при розбіжності порогів
+            # якорі лягають на слоти без фічей, і локалізатор або зсуває їх
+            # снапом, або зупиняє пропагацію на колізії.
+            "version": "2.4",
             # "mode" — ключ, який читає CoordinateConverter.from_metadata
             "projection": {"mode": "WEB_MERCATOR", "reference_gps": None},
             "frame_size": list(self._frame_size) if self._frame_size else None,
+            "keyframe_selection": {
+                "criterion": self.keyframe_criterion,
+                "max_overlap": self.keyframe_max_overlap,
+                "max_gap_frames": self.keyframe_max_gap_frames,
+                "frame_step": int(self.frame_step),
+            },
             "anchors": anchors,
         }
 

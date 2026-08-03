@@ -266,10 +266,20 @@ class ManualControl(CommandSource):
         cmd = CommandVector()
 
         # ---- Poll gamepad (realistic layout) ----
-        gp = self._gamepad.poll_realistic()
-
-        if self._gamepad.exit_pressed:
-            self._finished = True
+        # Defensive: the dispatcher only routes here when a gamepad exists,
+        # but keep this path keyboard-only-safe if it is ever called directly.
+        if self._gamepad is not None:
+            gp = self._gamepad.poll_realistic()
+            if self._gamepad.exit_pressed:
+                self._finished = True
+        else:
+            gp = {
+                "throttle": 0.0,
+                "yaw": 0.0,
+                "pitch": 0.0,
+                "roll": 0.0,
+                "active": False,
+            }
 
         # ---- Also read keyboard as fallback ----
         keys = self._poll_keys()

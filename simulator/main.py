@@ -233,6 +233,31 @@ def parse_args() -> SimulatorConfig:
         "(МУСИТЬ збігатися з database.frame_step системи локалізації)",
     )
     parser.add_argument(
+        "--keyframe-criterion",
+        dest="keyframe_criterion",
+        choices=["overlap", "step"],
+        default="overlap",
+        help="Стратегія відбору кадрів для якорів. overlap — ставити якорі лише "
+        "на слоти, які локалізатор залишить keyframe-ами (МУСИТЬ збігатися з "
+        "database.keyframe_criterion); step — стара поведінка",
+    )
+    parser.add_argument(
+        "--keyframe-max-overlap",
+        dest="keyframe_max_overlap",
+        type=float,
+        default=0.5,
+        help="Поріг перекриття для criterion=overlap "
+        "(МУСИТЬ збігатися з database.keyframe_max_overlap)",
+    )
+    parser.add_argument(
+        "--keyframe-max-gap-frames",
+        dest="keyframe_max_gap_frames",
+        type=int,
+        default=60,
+        help="Скільки слотів поспіль можна пропустити до примусового keyframe "
+        "(МУСИТЬ збігатися з database.keyframe_max_gap_frames)",
+    )
+    parser.add_argument(
         "--anchor-spacing-slots",
         dest="anchor_spacing_slots",
         type=int,
@@ -410,6 +435,9 @@ def main():
             turn_rate_deg_per_slot=cfg.anchor_turn_rate_deg,
             min_anchor_spacing_slots=cfg.anchor_spacing_slots,
             max_anchor_spacing_slots=cfg.anchor_max_spacing_slots,
+            keyframe_criterion=cfg.keyframe_criterion,
+            keyframe_max_overlap=cfg.keyframe_max_overlap,
+            keyframe_max_gap_frames=cfg.keyframe_max_gap_frames,
         )
     else:
         calib_logger = None
