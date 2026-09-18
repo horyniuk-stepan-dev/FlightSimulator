@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "name": "tilt_only",
+  "duration_s": 60.0,
+  "profiles": {
+    "altitude_m": [{"time_s": 0.0, "value": 750.0}],
+    "pitch_deg": [
+      {"time_s": 0.0, "value": 0.0},
+      {"time_s": 20.0, "value": 25.0},
+      {"time_s": 40.0, "value": -15.0},
+      {"time_s": 60.0, "value": 0.0}
+    ],
+    "roll_deg": [{"time_s": 0.0, "value": 0.0}],
+    "yaw_deg": [{"time_s": 0.0, "value": 0.0}]
+  }
+}

@@ -4,11 +4,10 @@ Camera renderer — extracts a camera frame from the orthophoto based on drone p
 This replaces Unity rendering: given the drone's (x, y, z, yaw), it crops and rotates
 the appropriate region of the orthophoto to produce a nadir camera view.
 
-Performance optimizations:
-- CPU: renders at half resolution then upscales (4x faster warpPerspective)
-- CPU: adaptive interpolation quality (NEAREST at high altitude, LINEAR at low)
-- GPU: bilinear interpolation (order=1) instead of bicubic (order=3)
-- GPU: adaptive parallax passes (1 at altitude>200m, 3 below)
+Rendering contract:
+- CPU is the deterministic full-resolution reference path.
+- GPU uses the same camera homography, DEM georeferencing, displacement formula,
+  invalid-ray policy and bilinear interpolation.
 - Frame caching when drone state hasn't changed
 - Inline quaternion math (avoids scipy.Rotation overhead)
 """
@@ -55,7 +54,12 @@ class CameraRenderer:
     _CACHE_POS_THRESHOLD = 0.01    # meters
     _CACHE_QUAT_THRESHOLD = 1e-5   # quaternion element delta
 
-    def __init__(self, camera: CameraModel, ortho_map: OrthophotoMap):
+    def __init__(
+        self,
+        camera: CameraModel,
+        ortho_map: OrthophotoMap,
+        renderer: str = "auto",
+    ):
         """
         Args:
             camera: Camera model with resolution and lens parameters.
@@ -63,6 +67,9 @@ class CameraRenderer:
         """
         self.camera = camera
         self.ortho_map = ortho_map
+        if renderer not in {"auto", "cpu", "gpu"}:
+            raise ValueError("renderer must be one of: auto, cpu, gpu")
+        self.renderer_requested = renderer
 
         # Precompute static camera matrices
         self.out_w = self.camera.image_width_px
@@ -98,8 +105,8 @@ class CameraRenderer:
         ], dtype=np.float64)
 
         # Precompute map homography (Orthophoto Pixels to World Ground)
-        res_x = self.ortho_map.res_x
-        res_y = self.ortho_map.res_y
+        res_x = getattr(self.ortho_map, "local_res_x", self.ortho_map.res_x)
+        res_y = getattr(self.ortho_map, "local_res_y", self.ortho_map.res_y)
         map_w = self.ortho_map.width
         map_h = self.ortho_map.height
         
@@ -116,14 +123,20 @@ class CameraRenderer:
 
         # Load the orthophoto image into GPU memory using CuPy if available
         try:
+            if renderer == "cpu":
+                raise ImportError("CPU renderer explicitly requested")
             import cupy as cp
             self.use_gpu = True
             # Transfer image to GPU. Cast to float32 for interpolation.
             self.gpu_image = cp.asarray(self.ortho_map.image, dtype=cp.float32)
             if self.ortho_map.elevation is not None:
                 self.gpu_elevation = cp.asarray(self.ortho_map.elevation, dtype=cp.float32)
+                self.gpu_map_to_elevation = cp.asarray(
+                    self.ortho_map.map_to_elevation_pixel_affine(), dtype=cp.float32
+                )
             else:
                 self.gpu_elevation = None
+                self.gpu_map_to_elevation = None
                 
             # Pre-initialize pixel grid
             V, U = cp.meshgrid(cp.arange(self.out_h), cp.arange(self.out_w), indexing='ij')
@@ -134,10 +147,24 @@ class CameraRenderer:
             
             print("[CameraRenderer] CuPy initialized. Rendering on GPU.")
         except ImportError:
+            if renderer == "gpu":
+                raise RuntimeError("GPU renderer requested but CuPy is unavailable")
             self.use_gpu = False
             self.gpu_image = None
             self.gpu_elevation = None
+            self.gpu_map_to_elevation = None
             print("[CameraRenderer] CuPy not found. Falling back to CPU rendering.")
+        except ValueError as exc:
+            if renderer == "gpu":
+                raise RuntimeError(str(exc)) from exc
+            self.use_gpu = False
+            self.gpu_image = None
+            self.gpu_elevation = None
+            self.gpu_map_to_elevation = None
+            print(f"[CameraRenderer] GPU geometry unavailable ({exc}). Using CPU.")
+
+        self.renderer_name = "gpu" if self.use_gpu else "cpu"
+        self.last_surface_valid_fraction = 1.0
 
     def _is_state_cached(self, state: DroneState) -> bool:
         """Check if the drone state is close enough to use cached frame."""
@@ -208,33 +235,65 @@ class CameraRenderer:
         return H1 @ self.H_map, P
 
     def _render_cpu(self, R_world_to_cam, T_cam, altitude):
-        """CPU rendering path with half-resolution optimization."""
-        # Always compute full-res P for HUD waypoint projection
+        """Reference CPU ray-map renderer, including the same DEM model as GPU."""
         H_final_full, P_full = self._compute_homography(R_world_to_cam, T_cam, self.K)
         self.last_P = P_full
-        
-        # Render at half resolution for speed, then upscale
-        H_final_half, _ = self._compute_homography(R_world_to_cam, T_cam, self.K_half)
-        
-        # Adaptive interpolation: NEAREST is faster at high altitudes where detail doesn't matter
-        if altitude > 500.0:
-            interp_flag = cv2.INTER_NEAREST
-        else:
-            interp_flag = cv2.INTER_LINEAR
-        
-        # warpPerspective at half resolution (4x fewer pixels = ~4x faster)
-        frame_half = cv2.warpPerspective(
+        try:
+            H_inv = np.linalg.inv(H_final_full)
+        except np.linalg.LinAlgError:
+            self.last_surface_valid_fraction = 0.0
+            return np.full((self.out_h, self.out_w, 3), 30, dtype=np.uint8)
+
+        vv, uu = np.mgrid[0:self.out_h, 0:self.out_w]
+        grid = np.stack((uu.ravel(), vv.ravel(), np.ones(uu.size)), axis=0)
+        mapped = H_inv @ grid
+        denominator = mapped[2]
+        # H_inv returns a homogeneous ground point whose denominator has the
+        # same sign as camera depth. Negative/zero depth is behind the camera
+        # or on the horizon and must not be rendered as plausible terrain.
+        valid = np.isfinite(denominator) & (denominator > 1e-9)
+        u_map = np.full(denominator.shape, np.nan, dtype=np.float64)
+        v_map = np.full(denominator.shape, np.nan, dtype=np.float64)
+        u_map[valid] = mapped[0, valid] / denominator[valid]
+        v_map[valid] = mapped[1, valid] / denominator[valid]
+
+        if self.ortho_map.elevation is not None:
+            lx = -float(T_cam @ R_world_to_cam[:, 0])
+            ly = -float(T_cam @ R_world_to_cam[:, 1])
+            drone_col, drone_row = self.ortho_map.local_to_pixel(lx, ly)
+
+            def sample_height(u, v):
+                return self.ortho_map.sample_elevation_at_map_pixels(u, v)
+
+            u_map, v_map = apply_parallax(
+                u_map,
+                v_map,
+                drone_col,
+                drone_row,
+                altitude,
+                sample_height,
+                self.ortho_map.base_elevation,
+                num_passes=passes_for_altitude(altitude),
+            )
+
+        valid &= np.isfinite(u_map) & np.isfinite(v_map)
+        valid &= (
+            (u_map >= 0)
+            & (u_map <= self.ortho_map.width - 1)
+            & (v_map >= 0)
+            & (v_map <= self.ortho_map.height - 1)
+        )
+        self.last_surface_valid_fraction = float(np.mean(valid))
+        u_map = np.where(valid, u_map, -1).reshape(self.out_h, self.out_w).astype(np.float32)
+        v_map = np.where(valid, v_map, -1).reshape(self.out_h, self.out_w).astype(np.float32)
+        return cv2.remap(
             self.ortho_map.image,
-            H_final_half,
-            (self.half_w, self.half_h),
-            flags=interp_flag | cv2.WARP_INVERSE_MAP,
+            u_map,
+            v_map,
+            interpolation=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=(30, 30, 30),
         )
-        
-        # Upscale to output resolution
-        frame = cv2.resize(frame_half, (self.out_w, self.out_h), interpolation=cv2.INTER_LINEAR)
-        return frame
 
     def _render_gpu(self, R_world_to_cam, T_cam, lx, ly, altitude):
         """GPU rendering path with optimized interpolation and adaptive parallax."""
@@ -248,7 +307,8 @@ class CameraRenderer:
         try:
             H_inv = np.linalg.inv(H_final)
         except np.linalg.LinAlgError:
-            H_inv = np.eye(3, dtype=np.float64)
+            self.last_surface_valid_fraction = 0.0
+            return np.full((self.out_h, self.out_w, 3), 30, dtype=np.uint8)
         
         H_inv_cp = cp.asarray(H_inv, dtype=cp.float32)
         
@@ -257,10 +317,10 @@ class CameraRenderer:
         v_map = H_inv_cp[1, 0] * self.gpu_grid[0] + H_inv_cp[1, 1] * self.gpu_grid[1] + H_inv_cp[1, 2] * self.gpu_grid[2]
         w_map = H_inv_cp[2, 0] * self.gpu_grid[0] + H_inv_cp[2, 1] * self.gpu_grid[1] + H_inv_cp[2, 2] * self.gpu_grid[2]
         
-        # Perspective division (add small epsilon to avoid div by zero)
-        w_div = w_map + 1e-7
-        u_map /= w_div
-        v_map /= w_div
+        valid_ray = cp.isfinite(w_map) & (w_map > 1e-7)
+        safe_w = cp.where(valid_ray, w_map, 1.0)
+        u_map /= safe_w
+        v_map /= safe_w
         
         # Parallax Displacement Mapping (3D Terrain) — adaptive passes.
         # The formula itself lives in simulator.terrain.parallax so that
@@ -269,14 +329,13 @@ class CameraRenderer:
         # with the rendered image by r*h_rel/altitude (audit 2026-08-01).
         if self.gpu_elevation is not None:
             drone_col, drone_row = self.ortho_map.local_to_pixel(lx, ly)
-            elev_h, elev_w = self.gpu_elevation.shape
-            row_scale = elev_h / self.ortho_map.height
-            col_scale = elev_w / self.ortho_map.width
-
             def _sample_h_abs(u, v):
-                coords = cp.stack([v * row_scale, u * col_scale], axis=0)
+                A = self.gpu_map_to_elevation
+                col = A[0, 0] * u + A[0, 1] * v + A[0, 2]
+                row = A[1, 0] * u + A[1, 1] * v + A[1, 2]
+                coords = cp.stack([row, col], axis=0)
                 return cupyx.scipy.ndimage.map_coordinates(
-                    self.gpu_elevation, coords, order=1, mode='nearest'
+                    self.gpu_elevation, coords, order=1, mode='constant', cval=cp.nan
                 )
 
             u_map, v_map = apply_parallax(
@@ -289,6 +348,17 @@ class CameraRenderer:
                 self.ortho_map.base_elevation,
                 num_passes=passes_for_altitude(altitude),
             )
+
+        valid = valid_ray & cp.isfinite(u_map) & cp.isfinite(v_map)
+        valid &= (
+            (u_map >= 0)
+            & (u_map <= self.ortho_map.width - 1)
+            & (v_map >= 0)
+            & (v_map <= self.ortho_map.height - 1)
+        )
+        self.last_surface_valid_fraction = float(cp.mean(valid).get())
+        u_map = cp.where(valid, u_map, -1)
+        v_map = cp.where(valid, v_map, -1)
         
         coords = cp.stack([v_map, u_map], axis=0)
         

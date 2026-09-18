@@ -230,11 +230,18 @@ class FlightController:
         """Get current drone state without stepping."""
         return DroneState.from_rotorpy_state(self._state, self._time)
 
-    def reset(self, position: np.ndarray | None = None):
+    def reset(
+        self,
+        position: np.ndarray | None = None,
+        *,
+        yaw: float = 0.0,
+        pitch: float = 0.0,
+        roll: float = 0.0,
+    ):
         """Reset the drone to initial or given position."""
         if position is not None:
             self._state['x'] = position.copy()
         self._state['v'] = np.zeros(3)
-        self._state['q'] = np.array([0.0, 0.0, 0.0, 1.0])
+        self._state['q'] = _euler_zxy_to_quat(yaw, pitch, roll)
         self._state['w'] = np.zeros(3)
         self._time = 0.0

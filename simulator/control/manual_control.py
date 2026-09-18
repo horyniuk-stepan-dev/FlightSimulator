@@ -178,13 +178,19 @@ class ManualControl(CommandSource):
         kb_right = 0.0
         kb_up = 0.0
 
-        if any(k in keys for k in ('w', 'ц')): kb_forward += self.speed_xy
-        if any(k in keys for k in ('s', 'і', 'ы')): kb_forward -= self.speed_xy
-        if any(k in keys for k in ('d', 'в')): kb_right += self.speed_xy
-        if any(k in keys for k in ('a', 'ф')): kb_right -= self.speed_xy
+        if any(k in keys for k in ('w', 'ц')):
+            kb_forward += self.speed_xy
+        if any(k in keys for k in ('s', 'і', 'ы')):
+            kb_forward -= self.speed_xy
+        if any(k in keys for k in ('d', 'в')):
+            kb_right += self.speed_xy
+        if any(k in keys for k in ('a', 'ф')):
+            kb_right -= self.speed_xy
 
-        if 'space' in keys: kb_up += self.speed_z
-        if 'shift' in keys: kb_up -= self.speed_z
+        if 'space' in keys:
+            kb_up += self.speed_z
+        if 'shift' in keys:
+            kb_up -= self.speed_z
 
         # ---- Gamepad input ----
         gp_forward = 0.0
@@ -289,12 +295,18 @@ class ManualControl(CommandSource):
         kb_throttle = 0.0
         kb_yaw = 0.0
 
-        if any(k in keys for k in ('w', 'ц')): kb_pitch += 1.0
-        if any(k in keys for k in ('s', 'і', 'ы')): kb_pitch -= 1.0
-        if any(k in keys for k in ('d', 'в')): kb_roll += 1.0
-        if any(k in keys for k in ('a', 'ф')): kb_roll -= 1.0
-        if 'space' in keys: kb_throttle += 1.0
-        if 'shift' in keys: kb_throttle -= 1.0
+        if any(k in keys for k in ('w', 'ц')):
+            kb_pitch += 1.0
+        if any(k in keys for k in ('s', 'і', 'ы')):
+            kb_pitch -= 1.0
+        if any(k in keys for k in ('d', 'в')):
+            kb_roll += 1.0
+        if any(k in keys for k in ('a', 'ф')):
+            kb_roll -= 1.0
+        if 'space' in keys:
+            kb_throttle += 1.0
+        if 'shift' in keys:
+            kb_throttle -= 1.0
 
         # Merge: gamepad priority
         if gp["active"]:

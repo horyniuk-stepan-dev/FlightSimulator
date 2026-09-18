@@ -5,6 +5,7 @@ Ties together physics, rendering, planning, and control.
 
 import argparse
 import math
+import random
 import sys
 import time
 from pathlib import Path
@@ -13,7 +14,6 @@ import cv2
 import numpy as np
 
 from simulator.config import SimulatorConfig
-from simulator.terrain.tile_loader import download_tiles
 from simulator.terrain.orthophoto_map import OrthophotoMap
 from simulator.camera.camera_model import CameraModel
 from simulator.camera.camera_renderer import CameraRenderer
@@ -22,6 +22,7 @@ from simulator.control.manual_control import ManualControl
 from simulator.control.auto_pilot import AutoPilot
 from simulator.control.semi_auto_control import SemiAutoControl
 from simulator.planning.survey_planner import SurveyPlanner
+from simulator.planning.scenario import FlightScenario, ProfiledCommandSource
 from simulator.display.hud import HUD
 from simulator.display.frame_sink import DisplaySink
 from simulator.display.video_sink import VideoWriterSink
@@ -29,6 +30,8 @@ from simulator.display.video_sink import VideoWriterSink
 
 from simulator.physics.telemetry_logger import TelemetryLogger
 from simulator.physics.calibration_logger import CalibrationLogger
+from simulator.physics.frame_ground_truth import FrameGroundTruthLogger
+from simulator.dataset_manifest import write_dataset_manifest
 
 
 def parse_args() -> SimulatorConfig:
@@ -180,6 +183,37 @@ def parse_args() -> SimulatorConfig:
         help="Disable 3D hillshade shading from elevation raster. "
         "Вимкнути світлотіньове 3D-рельефування.",
     )
+    parser.add_argument(
+        "--renderer",
+        choices=["auto", "cpu", "gpu"],
+        default="auto",
+        help="Rendering backend. 'cpu' is the deterministic reference path.",
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=0,
+        help="Stop after this many recorded frames (0 = full mission).",
+    )
+    parser.add_argument(
+        "--yes",
+        dest="assume_yes",
+        action="store_true",
+        help="Do not ask for interactive confirmation before record mode.",
+    )
+    parser.add_argument(
+        "--scenario",
+        dest="scenario_file",
+        type=str,
+        default="",
+        help="JSON scenario with deterministic altitude and camera attitude keyframes.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed recorded in the manifest (default: 0).",
+    )
 
     # File overrides
     parser.add_argument(
@@ -188,6 +222,25 @@ def parse_args() -> SimulatorConfig:
         type=str,
         default="",
         help="Path to existing GeoTIFF (skips download)",
+    )
+    parser.add_argument(
+        "--elevation",
+        dest="elevation_path",
+        type=str,
+        default="",
+        help="Georeferenced elevation GeoTIFF used with --geotiff.",
+    )
+    parser.add_argument(
+        "--elevation-format",
+        choices=["auto", "terrarium", "meters"],
+        default="auto",
+        help="DEM encoding: auto detects RGB Terrarium or one-band metre heights.",
+    )
+    parser.add_argument(
+        "--manifest-file",
+        type=str,
+        default="",
+        help="Dataset manifest path. Defaults beside --video-file when recording.",
     )
 
     # Telemetry
@@ -224,6 +277,14 @@ def parse_args() -> SimulatorConfig:
         default="",
         help="Шлях до ground_truth.json — GT по КОЖНОМУ слоту для "
         "validate_vs_telemetry.py (Етап 0.2). Потребує --calib-file",
+    )
+    parser.add_argument(
+        "--frame-gt-file",
+        dest="frame_gt_file",
+        type=str,
+        default="",
+        help="JSONL ground truth for every recorded frame. Defaults to "
+        "<video>.frames.jsonl when --video-file is set.",
     )
     parser.add_argument(
         "--frame-step",
@@ -296,12 +357,28 @@ def parse_args() -> SimulatorConfig:
 def main():
     print("=== Drone Flight Simulator ===")
     cfg = parse_args()
+    if cfg.target_fps <= 0:
+        raise ValueError("--fps must be positive")
+    if cfg.max_frames < 0:
+        raise ValueError("--max-frames cannot be negative")
+    random.seed(cfg.seed)
+    np.random.seed(cfg.seed)
+    if cfg.video_file and not cfg.frame_gt_file:
+        cfg.frame_gt_file = str(Path(cfg.video_file).with_suffix(".frames.jsonl"))
+    scenario = FlightScenario.load(cfg.scenario_file) if cfg.scenario_file else None
+    if scenario is not None:
+        cfg.altitude_m = scenario.altitude_m.value_at(0.0)
+        if cfg.max_frames <= 0:
+            cfg.max_frames = int(math.ceil(scenario.duration_s * cfg.target_fps))
+        print(f"Loaded scenario '{scenario.name}' ({scenario.duration_s:.1f}s)")
 
     # 1. Setup Terrain
     if cfg.geotiff_path and Path(cfg.geotiff_path).exists():
         print(f"Using provided GeoTIFF: {cfg.geotiff_path}")
         geotiff_path = cfg.geotiff_path
-        elevation_path = None
+        if cfg.elevation_path and not Path(cfg.elevation_path).exists():
+            raise FileNotFoundError(f"Elevation GeoTIFF not found: {cfg.elevation_path}")
+        elevation_path = cfg.elevation_path or None
     else:
         print("Downloading tiles...")
         from simulator.terrain.tile_loader import download_tiles, download_elevation
@@ -313,6 +390,7 @@ def main():
             lon_max=cfg.lon_max,
             zoom=cfg.zoom,
             map_date=cfg.map_date,
+            cache_dir=cfg.cache_dir,
         )
 
         elevation_path = download_elevation(
@@ -321,9 +399,14 @@ def main():
             lat_max=cfg.lat_max,
             lon_max=cfg.lon_max,
             zoom=min(cfg.zoom, 15),  # Terrain tiles max out at zoom 15 on AWS
+            cache_dir=cfg.cache_dir,
         )
 
-    ortho_map = OrthophotoMap(geotiff_path, elevation_path=elevation_path)
+    ortho_map = OrthophotoMap(
+        geotiff_path,
+        elevation_path=elevation_path,
+        elevation_format=cfg.elevation_format,
+    )
     if cfg.enable_hillshade and ortho_map.elevation is not None:
         ortho_map.apply_hillshade(blend_factor=0.35, z_factor=2.0)
 
@@ -346,7 +429,7 @@ def main():
 
     # 2. Camera setup
     camera = CameraModel.from_config(cfg.camera)
-    renderer = CameraRenderer(camera, ortho_map)
+    renderer = CameraRenderer(camera, ortho_map, renderer=cfg.renderer)
     hud = HUD(ortho_map)
 
     # 3. Physics setup
@@ -397,6 +480,19 @@ def main():
             gamepad_mode=cfg.gamepad_mode,
         )
 
+    if scenario is not None:
+        command_source = ProfiledCommandSource(command_source, scenario)
+        initial_state = flight_ctrl.get_state()
+        initial_pitch = scenario.pitch_deg.value_at(0.0) or 0.0
+        initial_roll = scenario.roll_deg.value_at(0.0) or 0.0
+        initial_yaw = scenario.yaw_deg.value_at(0.0) or 0.0
+        flight_ctrl.reset(
+            position=initial_state.position,
+            yaw=math.radians(initial_yaw),
+            pitch=math.radians(initial_pitch),
+            roll=math.radians(initial_roll),
+        )
+
     # 5. Display Sinks and Telemetry
     window_name = "Drone Simulator"
     sinks = []
@@ -438,9 +534,33 @@ def main():
             keyframe_criterion=cfg.keyframe_criterion,
             keyframe_max_overlap=cfg.keyframe_max_overlap,
             keyframe_max_gap_frames=cfg.keyframe_max_gap_frames,
+            generator_metadata={
+                "tool": "FlightSimulator",
+                "renderer": renderer.renderer_name,
+                "fps": cfg.target_fps,
+                "video_file": cfg.video_file,
+                "gt_file": cfg.gt_file,
+                "frame_gt_file": cfg.frame_gt_file,
+                "scenario": scenario.source_path if scenario is not None else None,
+            },
         )
     else:
         calib_logger = None
+
+    if cfg.frame_gt_file:
+        frame_gt_logger = FrameGroundTruthLogger(
+            cfg.frame_gt_file,
+            ortho_map,
+            width=camera.image_width_px,
+            height=camera.image_height_px,
+            fps=cfg.target_fps,
+            renderer=renderer.renderer_name,
+            focal_length_mm=camera.focal_length_mm,
+            sensor_width_mm=camera.sensor_width_mm,
+            scenario=scenario.source_path if scenario is not None else None,
+        )
+    else:
+        frame_gt_logger = None
 
     if not cfg.no_display:
         # Need a tiny delay to ensure window is created before polling properties
@@ -451,7 +571,7 @@ def main():
             if hasattr(command_source, "on_mouse"):
                 cv2.setMouseCallback(window_name, command_source.on_mouse)
 
-    if cfg.mode == "record":
+    if cfg.mode == "record" and not cfg.assume_yes:
         try:
             ans = input("Start recording? (y/n): ").strip().lower()
         except (UnicodeDecodeError, UnicodeEncodeError):
@@ -474,59 +594,36 @@ def main():
         f"{cfg.target_fps} FPS)..."
     )
 
-    prev_time = time.perf_counter()
-    accumulated_time = 0.0
+    next_frame_wall_time = time.perf_counter()
     # Лічильник кадрів У ЛОКСТЕПІ з video_sink: саме цей індекс бачитиме
     # DatabaseBuilder у відеофайлі, і саме від нього рахуються слоти якорів
     video_frame_idx = 0
+    run_status = "running"
 
     try:
         while not command_source.is_finished():
-            if offline:
-                # Offline rendering: run as fast as possible, simulating exactly target_dt per frame
-                actual_dt = target_dt
-                actual_fps = cfg.target_fps
-            else:
-                curr_time = time.perf_counter()
-                actual_dt = curr_time - prev_time
-
-                # Improved frame pacing: sleep for bulk of wait, spin-wait only the last ~2ms.
-                if actual_dt < target_dt:
-                    remaining = target_dt - actual_dt
-                    if remaining > 0.003:
-                        time.sleep(remaining - 0.002)
+            if not offline:
+                now_wall = time.perf_counter()
+                remaining = next_frame_wall_time - now_wall
+                if remaining > 0.002:
+                    time.sleep(remaining - 0.001)
                     continue
+                if remaining > 0:
+                    continue
+            next_frame_wall_time += target_dt
+            actual_dt = target_dt
+            actual_fps = cfg.target_fps
 
-                prev_time = curr_time
-                actual_fps = 1.0 / actual_dt if actual_dt > 0 else 0.0
-
-            accumulated_time += actual_dt
-            # Prevent "spiral of death" if rendering becomes very slow
-            if not offline and accumulated_time > 0.1:
-                accumulated_time = 0.1
-
-            # Step Physics (multiple fixed substeps for stability)
+            # Frame n is sampled at exactly n/fps. Physics advances only after
+            # that frame has been rendered and recorded.
             state = flight_ctrl.get_state()
-            cmd = command_source.get_command(state, actual_dt)
-            cmd_v = cmd.to_numpy()
-            target_yaw = cmd.yaw_rate  # We stored target_yaw in yaw_rate
-            target_pitch = cmd.pitch_rate
-            target_roll = cmd.roll
-            is_kinematic = True
-
-            while accumulated_time >= physics_dt:
-                state = flight_ctrl.step(
-                    cmd_v,
-                    target_yaw,
-                    target_pitch,
-                    physics_dt,
-                    kinematic=is_kinematic,
-                    roll=target_roll,
-                )
-                accumulated_time -= physics_dt
 
             # Log telemetry
-            telemetry_logger.log(state)
+            telemetry_logger.log(
+                state,
+                frame_index=video_frame_idx,
+                timestamp=video_frame_idx / cfg.target_fps,
+            )
 
             # Render frame
             gsd = camera.gsd_m_per_px(state.altitude)
@@ -535,18 +632,26 @@ def main():
             _t_render = time.perf_counter() - _t0
 
             current_wp_idx = getattr(command_source, "current_wp_idx", 0)
+            last_P = getattr(renderer, "last_P", None)
+            H1 = last_P[:, [0, 1, 3]] if last_P is not None else None
 
             if calib_logger:
                 # Викликаємо на КОЖЕН кадр (навіть без last_P) — логер веде
                 # вікно стабільності курсу; frame_idx = індекс кадру у відео
-                last_P = getattr(renderer, "last_P", None)
-                H1 = last_P[:, [0, 1, 3]] if last_P is not None else None
                 calib_logger.log(
                     H1,
                     camera.image_width_px,
                     camera.image_height_px,
                     state,
                     frame_idx=video_frame_idx,
+                    surface_valid_fraction=renderer.last_surface_valid_fraction,
+                )
+            if frame_gt_logger:
+                frame_gt_logger.log(
+                    H1,
+                    state,
+                    frame_index=video_frame_idx,
+                    surface_valid_fraction=renderer.last_surface_valid_fraction,
                 )
 
             # Display preview — only built when a window is actually open. The
@@ -557,7 +662,6 @@ def main():
                 if any(sink.is_closed() for sink in sinks):
                     print("\nWindow closed by user.")
                     break
-
                 if offline:
                     hud_frame = raw_frame
                 else:
@@ -583,6 +687,9 @@ def main():
             if video_sink:
                 video_sink.consume(raw_frame)
             video_frame_idx += 1
+            if cfg.max_frames > 0 and video_frame_idx >= cfg.max_frames:
+                print(f"Reached --max-frames={cfg.max_frames}.")
+                break
 
             # Window event pump + ESC / close handling — only when a window is
             # open. Skipping cv2.waitKey(1) in headless mode removes a ~1 ms/frame
@@ -610,8 +717,28 @@ def main():
                     print("\nWindow closed by user.")
                     break
 
+            cmd = command_source.get_command(state, actual_dt)
+            cmd_v = cmd.to_numpy()
+            remaining_physics = target_dt
+            while remaining_physics > 1e-12:
+                step_dt = min(physics_dt, remaining_physics)
+                flight_ctrl.step(
+                    cmd_v,
+                    cmd.yaw_rate,
+                    cmd.pitch_rate,
+                    step_dt,
+                    kinematic=True,
+                    roll=cmd.roll,
+                )
+                remaining_physics -= step_dt
+
+        run_status = "complete"
     except KeyboardInterrupt:
+        run_status = "interrupted"
         print("\nInterrupted by user.")
+    except Exception:
+        run_status = "failed"
+        raise
     finally:
         for sink in sinks:
             if hasattr(sink, "cleanup"):
@@ -622,10 +749,21 @@ def main():
             calib_logger.close()
             if cfg.gt_file:
                 calib_logger.dump_ground_truth(cfg.gt_file, fps=cfg.target_fps)
-        for sink in sinks:
-            sink.cleanup()
+        if frame_gt_logger:
+            frame_gt_logger.close()
         if video_sink:
             video_sink.cleanup()
+        manifest_path = cfg.manifest_file
+        if not manifest_path and cfg.video_file:
+            manifest_path = str(Path(cfg.video_file).with_suffix(".manifest.json"))
+        if manifest_path:
+            write_dataset_manifest(
+                manifest_path,
+                status=run_status,
+                config=cfg,
+                renderer=renderer.renderer_name,
+                frame_count=video_frame_idx,
+            )
         print("Simulation ended.")
 
 

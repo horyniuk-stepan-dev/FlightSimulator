@@ -10,7 +10,6 @@ import time
 import sys
 
 import contextily as cx
-import numpy as np
 
 
 class ProgressTracker:
@@ -160,4 +159,3 @@ def download_elevation(
     """Download AWS Terrain elevation tiles."""
     aws_terrarium = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
     return _download_raster(lat_min, lon_min, lat_max, lon_max, zoom, cache_dir, "elevation", aws_terrarium)
-

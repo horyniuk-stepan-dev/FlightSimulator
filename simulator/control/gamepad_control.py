@@ -13,7 +13,6 @@ If the controller exposes fewer axes (e.g. some DirectInput drivers
 merge triggers into one axis), the code gracefully falls back to 0.0.
 """
 
-import math
 import logging
 
 import pygame

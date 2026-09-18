@@ -27,3 +27,4 @@ models/yolo11n-seg.pt
 test_frame.png
 ground_truth.json
 preview.png
+output/

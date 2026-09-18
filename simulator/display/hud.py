@@ -52,6 +52,10 @@ class HUD:
         Returns:
             Frame with HUD overlay.
         """
+        # HUD is presentation only. Never mutate the clean camera frame that may
+        # subsequently be recorded or retained by CameraRenderer's frame cache.
+        frame = frame.copy()
+
         # Convert local position to GPS (throttled to save pyproj overhead)
         if self._frame_count % 10 == 0:
             self._last_gps = self.ortho_map.local_to_gps(state.position[0], state.position[1])

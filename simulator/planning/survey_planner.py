@@ -4,8 +4,6 @@ Survey Planner — generates a boustrophedon (lawnmower) flight path.
 import math
 from dataclasses import dataclass
 
-import numpy as np
-
 from simulator.camera.camera_model import CameraModel
 
 

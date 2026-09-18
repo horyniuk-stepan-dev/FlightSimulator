@@ -3,8 +3,6 @@ Auto Pilot — follows a list of waypoints using a simple P-controller.
 """
 import math
 
-import numpy as np
-
 from simulator.control.command_source import CommandSource, CommandVector
 from simulator.physics.drone_state import DroneState
 from simulator.planning.survey_planner import Waypoint
@@ -58,7 +56,6 @@ class AutoPilot(CommandSource):
         dz = target.z - state.position[2]
         
         dist_xy = math.hypot(dx, dy)
-        dist_z = abs(dz)
         dist_total = math.hypot(dist_xy, dz)
 
         # Check if arrived

@@ -18,7 +18,7 @@ class TelemetryLogger:
             log_interval_frames: Save telemetry every N frames.
         """
         self.output_file = Path(output_file)
-        self.log_interval_frames = log_interval_frames
+        self.log_interval_frames = max(1, int(log_interval_frames))
         self.frame_count = 0
         
         # Ensure parent directory exists
@@ -28,19 +28,30 @@ class TelemetryLogger:
         self.file_handle = open(self.output_file, 'w', newline='', encoding='utf-8')
         self.writer = csv.writer(self.file_handle)
         self.writer.writerow([
-            "sys_time", "sim_time", 
+            "frame_index", "timestamp", "sys_time", "sim_time",
             "pos_x", "pos_y", "alt_z", 
             "vel_x", "vel_y", "vel_z",
             "yaw_rad", "speed_3d"
         ])
             
-    def log(self, state: DroneState) -> None:
+    def log(
+        self,
+        state: DroneState,
+        frame_index: int | None = None,
+        timestamp: float | None = None,
+    ) -> None:
         """Log state if the frame interval is reached."""
+        if frame_index is None:
+            frame_index = self.frame_count
+        if timestamp is None:
+            timestamp = state.time
         self.frame_count += 1
-        if self.frame_count % self.log_interval_frames != 0:
+        if int(frame_index) % self.log_interval_frames != 0:
             return
             
         self.writer.writerow([
+            int(frame_index),
+            f"{float(timestamp):.9f}",
             f"{time.time():.3f}",
             f"{state.time:.3f}",
             f"{state.position[0]:.4f}", f"{state.position[1]:.4f}", f"{state.altitude:.4f}",

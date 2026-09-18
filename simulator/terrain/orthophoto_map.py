@@ -16,16 +16,28 @@ class OrthophotoMap:
     The "local" coordinate system is offset so that the map center is at (0, 0).
     """
 
-    def __init__(self, geotiff_path: str, elevation_path: str = None):
+    def __init__(
+        self,
+        geotiff_path: str,
+        elevation_path: str = None,
+        elevation_format: str = "auto",
+    ):
         """
         Load a GeoTIFF and prepare coordinate transforms.
 
         Args:
             geotiff_path: Path to GeoTIFF file (expected EPSG:3857).
             elevation_path: Path to Elevation GeoTIFF file.
+            elevation_format: ``auto``, RGB ``terrarium``, or one-band
+                ``meters``. Auto selects Terrarium for rasters with at least
+                three bands and metres for single-band rasters.
         """
         self.path = geotiff_path
         self.elevation_path = elevation_path
+        if elevation_format not in {"auto", "terrarium", "meters"}:
+            raise ValueError("elevation_format must be auto, terrarium, or meters")
+        self.elevation_format = elevation_format
+        self.elevation_format_actual = None
 
         with rasterio.open(geotiff_path) as src:
             # Read as (bands, H, W), then transpose to (H, W, bands) for OpenCV
@@ -54,30 +66,76 @@ class OrthophotoMap:
         self._wgs84_to_mercator = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
         self._mercator_to_wgs84 = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
 
+        center_lon, center_lat = self._mercator_to_wgs84.transform(
+            self._center_x, self._center_y
+        )
+        self.reference_gps = (float(center_lat), float(center_lon))
+        # Web Mercator is conformal but its coordinate units are enlarged by
+        # sec(latitude). Use a local tangent-scale approximation so flight
+        # speed, camera footprint and altitude are all expressed in ground metres.
+        self.ground_scale = float(np.cos(np.radians(center_lat)))
+
         # Compute resolution (meters per pixel)
         self.res_x = abs(self._transform.a)  # meters/pixel in X
         self.res_y = abs(self._transform.e)  # meters/pixel in Y (negative in affine)
+        self.local_res_x = self.res_x * self.ground_scale
+        self.local_res_y = self.res_y * self.ground_scale
 
         self.elevation = None
         self.base_elevation = 0.0
+        self._elevation_transform = None
+        self._elevation_inv_transform = None
+        self._elevation_crs = None
+        self._elevation_nodata = None
+        self._map_to_elevation_crs = None
         
         if self.elevation_path:
             with rasterio.open(self.elevation_path) as src_elev:
-                # Read RGB bands
-                elev_data = src_elev.read()
-                R = elev_data[0].astype(np.float32)
-                G = elev_data[1].astype(np.float32)
-                B = elev_data[2].astype(np.float32)
-                
-                # AWS Terrarium formula
-                self.elevation = (R * 256.0 + G + B / 256.0) - 32768.0
-                self.base_elevation = np.min(self.elevation)
+                actual_format = elevation_format
+                if actual_format == "auto":
+                    actual_format = "terrarium" if src_elev.count >= 3 else "meters"
+                if actual_format == "terrarium":
+                    if src_elev.count < 3:
+                        raise ValueError(
+                            "Terrarium elevation requires at least three raster bands"
+                        )
+                    elev_data = src_elev.read([1, 2, 3], masked=True)
+                    red = elev_data[0].astype(np.float32)
+                    green = elev_data[1].astype(np.float32)
+                    blue = elev_data[2].astype(np.float32)
+                    decoded = (red * 256.0 + green + blue / 256.0) - 32768.0
+                    self.elevation = np.asarray(
+                        np.ma.filled(decoded, np.nan), dtype=np.float32
+                    )
+                else:
+                    decoded = src_elev.read(1, masked=True).astype(np.float32)
+                    self.elevation = np.asarray(
+                        np.ma.filled(decoded, np.nan), dtype=np.float32
+                    )
+                self.elevation_format_actual = actual_format
+                self._elevation_transform = src_elev.transform
+                self._elevation_inv_transform = ~src_elev.transform
+                self._elevation_crs = src_elev.crs
+                self._elevation_nodata = src_elev.nodata
+                if self._crs != self._elevation_crs:
+                    self._map_to_elevation_crs = Transformer.from_crs(
+                        self._crs, self._elevation_crs, always_xy=True
+                    )
+                finite = self.elevation[np.isfinite(self.elevation)]
+                if finite.size == 0:
+                    raise ValueError("Elevation raster contains no finite heights")
+                self.base_elevation = float(np.min(finite))
 
         print(f"[OrthophotoMap] Loaded: {self.image.shape[1]}x{self.image.shape[0]} px, "
-              f"resolution: {self.res_x:.3f} m/px")
+              f"resolution: {self.local_res_x:.3f} ground-m/px "
+              f"({self.res_x:.3f} projected units/px)")
         print(f"[OrthophotoMap] Center (WM): ({self._center_x:.1f}, {self._center_y:.1f})")
         if self.elevation is not None:
-            print(f"[OrthophotoMap] Elevation loaded. Min: {np.min(self.elevation):.1f}m, Max: {np.max(self.elevation):.1f}m")
+            print(
+                f"[OrthophotoMap] Elevation loaded ({self.elevation_format_actual}). "
+                f"Min: {np.nanmin(self.elevation):.1f}m, "
+                f"Max: {np.nanmax(self.elevation):.1f}m"
+            )
 
     def generate_hillshade(
         self,
@@ -177,16 +235,20 @@ class OrthophotoMap:
         Get map bounds in local coordinates (meters, centered at map center).
         Returns: (x_min, y_min, x_max, y_max)
         """
-        x_min = self._bounds.left - self._center_x
-        x_max = self._bounds.right - self._center_x
-        y_min = self._bounds.bottom - self._center_y
-        y_max = self._bounds.top - self._center_y
+        ground_scale = getattr(self, "ground_scale", 1.0)
+        x_min = (self._bounds.left - self._center_x) * ground_scale
+        x_max = (self._bounds.right - self._center_x) * ground_scale
+        y_min = (self._bounds.bottom - self._center_y) * ground_scale
+        y_max = (self._bounds.top - self._center_y) * ground_scale
         return x_min, y_min, x_max, y_max
 
     def get_size_meters(self) -> tuple[float, float]:
         """Returns (width_m, height_m) of the map in meters."""
-        return (self._bounds.right - self._bounds.left,
-                self._bounds.top - self._bounds.bottom)
+        ground_scale = getattr(self, "ground_scale", 1.0)
+        return (
+            (self._bounds.right - self._bounds.left) * ground_scale,
+            (self._bounds.top - self._bounds.bottom) * ground_scale,
+        )
 
     def local_to_pixel(self, lx: float, ly: float) -> tuple[float, float]:
         """
@@ -199,11 +261,75 @@ class OrthophotoMap:
             (px, py): Pixel coordinates (column, row).
         """
         # Local → Web Mercator
-        mx = lx + self._center_x
-        my = ly + self._center_y
+        ground_scale = getattr(self, "ground_scale", 1.0)
+        mx = lx / ground_scale + self._center_x
+        my = ly / ground_scale + self._center_y
         # Web Mercator → pixel
         col, row = self._inv_transform * (mx, my)
         return float(col), float(row)
+
+    def map_pixels_to_elevation_pixels(self, cols, rows):
+        """Map orthophoto pixels to DEM pixels through both rasters' georeferencing."""
+        if self._elevation_inv_transform is None:
+            raise ValueError("Elevation raster is not available")
+        cols = np.asarray(cols, dtype=np.float64)
+        rows = np.asarray(rows, dtype=np.float64)
+        t = self._transform
+        xs = t.a * cols + t.b * rows + t.c
+        ys = t.d * cols + t.e * rows + t.f
+        if self._map_to_elevation_crs is not None:
+            xs, ys = self._map_to_elevation_crs.transform(xs, ys)
+        inv = self._elevation_inv_transform
+        dem_cols = inv.a * xs + inv.b * ys + inv.c
+        dem_rows = inv.d * xs + inv.e * ys + inv.f
+        return np.asarray(dem_cols), np.asarray(dem_rows)
+
+    def sample_elevation_at_map_pixels(self, cols, rows, *, return_valid=False):
+        """Bilinearly sample DEM by orthophoto pixel coordinates.
+
+        Out-of-coverage samples are NaN. They are never silently clamped to the
+        nearest DEM edge because that would give a plausible height for the
+        wrong geographic point.
+        """
+        if self.elevation is None:
+            values = np.zeros_like(np.asarray(cols, dtype=np.float64))
+            valid = np.ones_like(values, dtype=bool)
+            return (values, valid) if return_valid else values
+        from simulator.terrain.parallax import sample_bilinear
+
+        dem_cols, dem_rows = self.map_pixels_to_elevation_pixels(cols, rows)
+        h, w = self.elevation.shape[:2]
+        valid = (
+            np.isfinite(dem_cols)
+            & np.isfinite(dem_rows)
+            & (dem_cols >= 0.0)
+            & (dem_cols <= w - 1.0)
+            & (dem_rows >= 0.0)
+            & (dem_rows <= h - 1.0)
+        )
+        safe_cols = np.where(valid, dem_cols, 0.0)
+        safe_rows = np.where(valid, dem_rows, 0.0)
+        values = sample_bilinear(self.elevation, safe_rows, safe_cols)
+        valid &= np.isfinite(values)
+        values = np.where(valid, values, np.nan)
+        return (values, valid) if return_valid else values
+
+    def map_to_elevation_pixel_affine(self) -> np.ndarray:
+        """Return a 3x3 orthophoto-pixel -> DEM-pixel affine for GPU sampling."""
+        if self._elevation_inv_transform is None:
+            raise ValueError("Elevation raster is not available")
+        if self._map_to_elevation_crs is not None:
+            raise ValueError("GPU elevation sampling requires matching raster CRS")
+
+        def matrix(affine):
+            return np.array(
+                [[affine.a, affine.b, affine.c],
+                 [affine.d, affine.e, affine.f],
+                 [0.0, 0.0, 1.0]],
+                dtype=np.float64,
+            )
+
+        return matrix(self._elevation_inv_transform) @ matrix(self._transform)
 
     def pixel_to_local(self, px: float, py: float) -> tuple[float, float]:
         """
@@ -216,7 +342,25 @@ class OrthophotoMap:
             (lx, ly): Local position in meters.
         """
         mx, my = self._transform * (px, py)
-        return float(mx - self._center_x), float(my - self._center_y)
+        ground_scale = getattr(self, "ground_scale", 1.0)
+        return (
+            float((mx - self._center_x) * ground_scale),
+            float((my - self._center_y) * ground_scale),
+        )
+
+    def local_to_mercator(self, lx: float, ly: float) -> tuple[float, float]:
+        ground_scale = getattr(self, "ground_scale", 1.0)
+        return (
+            float(lx / ground_scale + self._center_x),
+            float(ly / ground_scale + self._center_y),
+        )
+
+    def mercator_to_local(self, mx: float, my: float) -> tuple[float, float]:
+        ground_scale = getattr(self, "ground_scale", 1.0)
+        return (
+            float((mx - self._center_x) * ground_scale),
+            float((my - self._center_y) * ground_scale),
+        )
 
     def local_to_gps(self, lx: float, ly: float) -> tuple[float, float]:
         """
@@ -225,8 +369,7 @@ class OrthophotoMap:
         Returns:
             (lat, lon)
         """
-        mx = lx + self._center_x
-        my = ly + self._center_y
+        mx, my = self.local_to_mercator(lx, ly)
         lon, lat = self._mercator_to_wgs84.transform(mx, my)
         return lat, lon
 

@@ -41,6 +41,8 @@ class SimulatorConfig:
     lon_max: float = 30.5690
     zoom: int = 17  # Reduced zoom to keep VRAM usage normal for a large map
     geotiff_path: str = ""  # If provided, skip tile download
+    elevation_path: str = ""  # Optional georeferenced DEM used with --geotiff
+    elevation_format: str = "auto"  # auto, terrarium RGB, or one-band metres
     # Епоха супутникових знімків (Esri Wayback): "YYYY", "YYYY-MM" або
     # "YYYY-MM-DD". Порожньо → поточний Esri.WorldImagery (стара поведінка).
     # Дозволяє зняти той самий район у різні періоди (напр. літо vs зима).
@@ -78,6 +80,10 @@ class SimulatorConfig:
     fast: bool = False
     # no_display: do not open the live preview window (headless run).
     no_display: bool = False
+    renderer: str = "auto"
+    max_frames: int = 0
+    assume_yes: bool = False
+    seed: int = 0
 
     # Components
     camera: CameraConfig = field(default_factory=CameraConfig)
@@ -96,6 +102,9 @@ class SimulatorConfig:
     # Ground-truth експорт ПО СЛОТАХ для validate_vs_telemetry.py (Етап 0.2).
     # Порожньо → не пишеться. Потребує --calib-file (спільний CalibrationLogger).
     gt_file: str = ""
+    # Потоковий GT для кожного записаного кадру. Якщо є video_file, але шлях
+    # порожній, main автоматично створює <video>.frames.jsonl.
+    frame_gt_file: str = ""
     # МУСИТЬ збігатися з database.frame_step системи локалізації:
     # слот БД S = кадр відео S * frame_step
     frame_step: int = 30
@@ -114,3 +123,5 @@ class SimulatorConfig:
     # Heading-hold (градуси): сталий курс камери на весь політ, як у гімбала
     # реального дрона. None → ніс слідує за вектором швидкості (стара поведінка)
     heading_hold_deg: float | None = None
+    scenario_file: str = ""
+    manifest_file: str = ""

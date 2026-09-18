@@ -46,7 +46,10 @@ import numpy as np
 
 from simulator.physics.drone_state import DroneState
 from simulator.physics.keyframe_predictor import predict_keyframe_slots
-from simulator.terrain.parallax import apply_parallax, elevation_sampler
+from simulator.terrain.surface_projection import (
+    ProjectionGeometryError,
+    project_image_pixels_to_surface,
+)
 
 if TYPE_CHECKING:  # rasterio потрібен лише реальній мапі, не логеру
     from simulator.terrain.orthophoto_map import OrthophotoMap
@@ -65,6 +68,8 @@ class CalibrationLogger:
         keyframe_criterion: str = "overlap",
         keyframe_max_overlap: float = 0.5,
         keyframe_max_gap_frames: int = 60,
+        strict_terrain: bool = True,
+        generator_metadata: dict | None = None,
     ):
         """
         Args:
@@ -98,12 +103,13 @@ class CalibrationLogger:
         self.keyframe_criterion = str(keyframe_criterion)
         self.keyframe_max_overlap = float(keyframe_max_overlap)
         self.keyframe_max_gap_frames = int(keyframe_max_gap_frames)
+        self.strict_terrain = bool(strict_terrain)
+        self.generator_metadata = dict(generator_metadata or {})
 
         # Кандидати якорів: по одному на КОЖЕН слот БД з валідною H1
         self._candidates: list[dict] = []
         self._frame_size: tuple[int, int] | None = None
         self._skipped_bad_h = 0
-        self._warned_terrain = False
 
     # ── Внутрішнє ────────────────────────────────────────────────────────────
 
@@ -213,6 +219,7 @@ class CalibrationLogger:
         height: int,
         state: DroneState,
         frame_idx: int,
+        surface_valid_fraction: float = 1.0,
     ) -> bool:
         """
         Викликається на КОЖЕН кадр відео (frame_idx — індекс кадру у файлі,
@@ -229,12 +236,6 @@ class CalibrationLogger:
 
         if H1 is None:
             return False
-        try:
-            H1_inv = np.linalg.inv(H1)
-        except np.linalg.LinAlgError:
-            self._skipped_bad_h += 1
-            return False
-
         # 5 опорних точок: центр + 4 розкидані (20% / 80% кадру)
         w, h = float(width), float(height)
         pts_px = np.array(
@@ -247,22 +248,21 @@ class CalibrationLogger:
             ],
             dtype=np.float64,
         )
-        pts_hom = np.hstack([pts_px, np.ones((5, 1))])
-        pts_local_hom = (H1_inv @ pts_hom.T).T
-        pts_local = pts_local_hom[:, :2] / pts_local_hom[:, 2:]
-
-        # Рельєф: зміщуємо точки тим самим правилом, що й рендер (див. модуль
-        # simulator.terrain.parallax). Без рельєфу — тотожність, тож поведінка
-        # на пласких мапах побітово незмінна.
-        pts_local = self._apply_terrain(pts_local, state)
-
-        # local → Web Mercator (метри) та local → GPS (точна проєкція)
-        pts_mercator = pts_local + np.array(
-            [self.ortho_map._center_x, self.ortho_map._center_y]
-        )
-        pts_gps = [
-            list(self.ortho_map.local_to_gps(float(x), float(y))) for x, y in pts_local
-        ]
+        try:
+            projection = project_image_pixels_to_surface(
+                H1,
+                pts_px,
+                self.ortho_map,
+                state,
+                strict_terrain=self.strict_terrain,
+            )
+        except ProjectionGeometryError:
+            self._skipped_bad_h += 1
+            return False
+        pts_local = projection.local_xy
+        pts_mercator = projection.mercator_xy
+        pts_gps = projection.gps
+        camera_agl = projection.camera_agl_m
 
         # LSQ-фіт по всіх 5 точках + чесні метрики залишків
         M = self._fit_affine_lsq(pts_px, pts_mercator)
@@ -290,6 +290,16 @@ class CalibrationLogger:
                 "heading": self._movement_heading(state),
                 "yaw_deg": math.degrees(state.yaw),
                 "alt": float(state.altitude),
+                "camera_agl": camera_agl,
+                "camera_position": np.asarray(state.position, dtype=float).tolist(),
+                "camera_orientation_xyzw": np.asarray(
+                    state.quaternion, dtype=float
+                ).tolist(),
+                "timestamp": float(state.time),
+                "ground_center_local": pts_local[0].tolist(),
+                "ground_center_mercator": pts_mercator[0].tolist(),
+                "ground_center_gps": pts_gps[0],
+                "surface_valid_fraction": float(surface_valid_fraction),
                 "M": M,
                 "rmse": float(np.sqrt(np.mean(errs**2))),
                 "median": float(np.median(errs)),
@@ -300,51 +310,6 @@ class CalibrationLogger:
             }
         )
         return True
-
-    def _apply_terrain(self, pts_local: np.ndarray, state: DroneState) -> np.ndarray:
-        """Переносить точки з площини Z=0 на поверхню рельєфу.
-
-        Повертає вхід без змін, якщо мапа без DEM або не вміє в піксельні
-        координати (мінімальні двійники в тестах) — пласка сцена лишається
-        точною за побудовою.
-        """
-        elevation = getattr(self.ortho_map, "elevation", None)
-        if elevation is None:
-            return pts_local
-        if not hasattr(self.ortho_map, "local_to_pixel"):
-            return pts_local
-
-        try:
-            cols, rows = [], []
-            for x, y in pts_local:
-                c, r = self.ortho_map.local_to_pixel(float(x), float(y))
-                cols.append(c)
-                rows.append(r)
-            drone_col, drone_row = self.ortho_map.local_to_pixel(
-                float(state.position[0]), float(state.position[1])
-            )
-            sampler = elevation_sampler(
-                elevation, self.ortho_map.width, self.ortho_map.height
-            )
-            u, v = apply_parallax(
-                np.asarray(cols, dtype=np.float64),
-                np.asarray(rows, dtype=np.float64),
-                drone_col,
-                drone_row,
-                float(state.altitude),
-                sampler,
-                float(getattr(self.ortho_map, "base_elevation", 0.0)),
-            )
-            return np.array(
-                [self.ortho_map.pixel_to_local(float(cu), float(cv)) for cu, cv in zip(u, v)],
-                dtype=np.float64,
-            )
-        except Exception as e:  # noqa: BLE001 — краще плаский якір, ніж жодного
-            if not self._warned_terrain:
-                print(f"[CalibrationLogger] WARN: terrain correction unavailable ({e}) — "
-                      f"anchors fall back to the flat Z=0 plane")
-                self._warned_terrain = True
-            return pts_local
 
     # ── Узгодження з keyframe-селекцією локалізатора ─────────────────────────
 
@@ -469,7 +434,10 @@ class CalibrationLogger:
         slots = []
         for idx, c in enumerate(self._candidates):
             M = np.asarray(c["M"], dtype=np.float64)
-            center = M[:, :2] @ np.array([cx, cy]) + M[:, 2]
+            # The direct centre ray is ground truth. The affine centre is a
+            # lossy compatibility approximation and is exported separately.
+            center = np.asarray(c["ground_center_mercator"], dtype=np.float64)
+            affine_center = M[:, :2] @ np.array([cx, cy]) + M[:, 2]
             sx = float(np.hypot(M[0, 0], M[1, 0]))
             sy = float(np.hypot(M[0, 1], M[1, 1]))
             angle_deg = float(math.degrees(math.atan2(M[1, 0], M[0, 0])))
@@ -479,6 +447,17 @@ class CalibrationLogger:
                     "video_frame": int(c["video_frame"]),
                     "affine": M.tolist(),
                     "center_mercator": [float(center[0]), float(center[1])],
+                    "affine_center_mercator": [
+                        float(affine_center[0]), float(affine_center[1])
+                    ],
+                    "ground_center_local": c["ground_center_local"],
+                    "ground_center_gps": c["ground_center_gps"],
+                    "ground_center_valid": True,
+                    "camera_position_world": c["camera_position"],
+                    "camera_orientation_xyzw": c["camera_orientation_xyzw"],
+                    "camera_agl": float(c["camera_agl"]),
+                    "timestamp": float(c["timestamp"]),
+                    "surface_valid_fraction": float(c["surface_valid_fraction"]),
                     "sx": sx,
                     "sy": sy,
                     "angle_deg": angle_deg,
@@ -492,7 +471,7 @@ class CalibrationLogger:
             )
 
         data = {
-            "version": "gt-1.0",
+            "version": "gt-2.0",
             "projection": {"mode": "WEB_MERCATOR", "reference_gps": None},
             "frame_size": list(self._frame_size) if self._frame_size else None,
             "frame_step": int(self.frame_step),
@@ -501,6 +480,13 @@ class CalibrationLogger:
                 float(self.ortho_map._center_x),
                 float(self.ortho_map._center_y),
             ],
+            "coordinate_contract": {
+                "world_xy": "local ground-plane metres, Mercator scale corrected at map centre",
+                "world_z": "height above the simulator base plane",
+                "ground_center": "direct centre-ray surface intersection",
+                "affine": "five-point least-squares compatibility approximation",
+            },
+            "generator": self.generator_metadata,
             "slots": slots,
         }
 
@@ -585,6 +571,7 @@ class CalibrationLogger:
                 "max_gap_frames": self.keyframe_max_gap_frames,
                 "frame_step": int(self.frame_step),
             },
+            "generator": self.generator_metadata,
             "anchors": anchors,
         }
 

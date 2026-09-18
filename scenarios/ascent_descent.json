@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "name": "ascent_descent",
+  "duration_s": 60.0,
+  "profiles": {
+    "altitude_m": [
+      {"time_s": 0.0, "value": 500.0},
+      {"time_s": 20.0, "value": 1000.0},
+      {"time_s": 40.0, "value": 1000.0},
+      {"time_s": 60.0, "value": 500.0}
+    ],
+    "pitch_deg": [{"time_s": 0.0, "value": 0.0}],
+    "roll_deg": [{"time_s": 0.0, "value": 0.0}],
+    "yaw_deg": [{"time_s": 0.0, "value": 0.0}]
+  }
+}

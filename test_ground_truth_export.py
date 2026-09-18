@@ -18,8 +18,14 @@ import numpy as np
 
 from simulator.physics.calibration_logger import CalibrationLogger
 from test_calibration_logger import (
-    CX, CY, FPS, FRAME_STEP, W, H,
-    FakeOrthoMap, make_H1, make_state, simulate_lawnmower,
+    FPS,
+    FRAME_STEP,
+    H,
+    W,
+    FakeOrthoMap,
+    make_H1,
+    make_state,
+    simulate_lawnmower,
 )
 
 
@@ -55,11 +61,12 @@ def main():
     print(f"[1] OK: {n_cand} слот-кандидатів експортовано (з них {n_anch} якорів)")
 
     # [2] Метадані
-    assert gt["version"] == "gt-1.0"
+    assert gt["version"] == "gt-2.0"
     assert gt["frame_step"] == FRAME_STEP and gt["fps"] == FPS
     assert gt["frame_size"] == [W, H]
     assert abs(gt["map_center"][0] - FakeOrthoMap._center_x) < 1e-6
     assert abs(gt["map_center"][1] - FakeOrthoMap._center_y) < 1e-6
+    assert gt["coordinate_contract"]["ground_center"].startswith("direct centre-ray")
     print(f"[2] OK: метадані (map_center={gt['map_center']}, step={FRAME_STEP}, fps={FPS})")
 
     # [3] center_mercator = GT позиція центру кадру (<1 мм); affine det<0
@@ -75,6 +82,9 @@ def main():
         assert M.shape == (2, 3)
         det = M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0]
         assert det < 0, f"slot {s['slot']}: det {det} >= 0"
+        assert len(s["camera_position_world"]) == 3
+        assert len(s["camera_orientation_xyzw"]) == 4
+        assert s["ground_center_valid"] is True
     print("[3] OK: center_mercator відтворює GT-позицію центру (<1 мм), усі det<0")
 
     # [4] is_anchor узгоджений з calibration.json
