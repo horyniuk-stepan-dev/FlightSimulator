@@ -1,0 +1,200 @@
+{
+ "version": 1,
+ "name": "testtopboch_route3min",
+ "description": "3-minute query for testtopboch_max: its own diagonal route across the map (headings [63, 119, 63, 131] deg, crossing the north-south reference legs at 30-60 deg), speed set by --speed (route 9.4 km: 50 m/s covers it in ~188 s), altitude 450-2000 m through all three layers (vertical rate <= 20 m/s), camera pitch -12..+18 deg and roll -8..+8 deg, yaw 0 (north-up like the heading-hold references). Route points are local map metres (x east, y north, map centre 0,0); the simulator refuses points whose footprint at the highest altitude plus the largest tilt would leave the map. Extra keys (description, phases) are ignored by the loader.",
+ "duration_s": 180.0,
+ "phases": [
+  {
+   "from_s": 0,
+   "to_s": 12,
+   "label": "acquire_1000",
+   "note": "cold start on the 1000 m layer (main), nadir"
+  },
+  {
+   "from_s": 12,
+   "to_s": 62,
+   "label": "climb_1000_2000",
+   "note": "handoff main -> 2 (2000 m); passes 1414 m, equal scale to both layers; pitch up to 12 deg, roll to 8 deg"
+  },
+  {
+   "from_s": 62,
+   "to_s": 72,
+   "label": "hold_2000",
+   "note": "exact scale of layer 2, nadir"
+  },
+  {
+   "from_s": 72,
+   "to_s": 146,
+   "label": "descend_2000_520",
+   "note": "handoffs 2 -> main (1414 m) -> 3 (707 m); pitch -10 deg then +18 deg, roll -8 deg"
+  },
+  {
+   "from_s": 146,
+   "to_s": 155,
+   "label": "low_dip_450",
+   "note": "below the lowest layer (500 m)"
+  },
+  {
+   "from_s": 155,
+   "to_s": 180,
+   "label": "climb_500_1000",
+   "note": "handoff 3 -> main; pitch -12 deg then nadir"
+  }
+ ],
+ "route": [
+  {
+   "x_m": -4000.0,
+   "y_m": -600.0
+  },
+  {
+   "x_m": -1500.0,
+   "y_m": 700.0
+  },
+  {
+   "x_m": 1000.0,
+   "y_m": -700.0
+  },
+  {
+   "x_m": 3500.0,
+   "y_m": 600.0
+  },
+  {
+   "x_m": 4200.0,
+   "y_m": 0.0
+  }
+ ],
+ "profiles": {
+  "altitude_m": [
+   {
+    "time_s": 0.0,
+    "value": 1000.0
+   },
+   {
+    "time_s": 12.0,
+    "value": 1000.0
+   },
+   {
+    "time_s": 62.0,
+    "value": 2000.0
+   },
+   {
+    "time_s": 72.0,
+    "value": 2000.0
+   },
+   {
+    "time_s": 146.0,
+    "value": 520.0
+   },
+   {
+    "time_s": 150.0,
+    "value": 450.0
+   },
+   {
+    "time_s": 155.0,
+    "value": 500.0
+   },
+   {
+    "time_s": 180.0,
+    "value": 1000.0
+   }
+  ],
+  "pitch_deg": [
+   {
+    "time_s": 0.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 15.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 30.0,
+    "value": 12.0
+   },
+   {
+    "time_s": 50.0,
+    "value": 12.0
+   },
+   {
+    "time_s": 62.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 80.0,
+    "value": -10.0
+   },
+   {
+    "time_s": 95.0,
+    "value": -10.0
+   },
+   {
+    "time_s": 105.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 115.0,
+    "value": 18.0
+   },
+   {
+    "time_s": 135.0,
+    "value": 18.0
+   },
+   {
+    "time_s": 145.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 160.0,
+    "value": -12.0
+   },
+   {
+    "time_s": 170.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 180.0,
+    "value": 0.0
+   }
+  ],
+  "roll_deg": [
+   {
+    "time_s": 0.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 40.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 50.0,
+    "value": 8.0
+   },
+   {
+    "time_s": 60.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 120.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 128.0,
+    "value": -8.0
+   },
+   {
+    "time_s": 140.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 180.0,
+    "value": 0.0
+   }
+  ],
+  "yaw_deg": [
+   {
+    "time_s": 0.0,
+    "value": 0.0
+   }
+  ]
+ }
+}

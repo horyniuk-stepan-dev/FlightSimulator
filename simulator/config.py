@@ -99,6 +99,9 @@ class SimulatorConfig:
     # Video and Calibration logging
     video_file: str = ""
     calib_file: str = ""
+    # Image-based keyframe selection produced from the final encoded video.
+    # main.py fills this automatically when both video and calibration are set.
+    keyframe_file: str = ""
     # Ground-truth експорт ПО СЛОТАХ для validate_vs_telemetry.py (Етап 0.2).
     # Порожньо → не пишеться. Потребує --calib-file (спільний CalibrationLogger).
     gt_file: str = ""
@@ -113,10 +116,10 @@ class SimulatorConfig:
     anchor_turn_rate_deg: float = 3.0
     anchor_spacing_slots: int = 15
     anchor_max_spacing_slots: int = 60
-    # Стратегія відбору кадрів — МУСИТЬ збігатися з database.keyframe_* системи
-    # локалізації. "overlap": якорі ставляться лише на слоти, які локалізатор
-    # залишить keyframe-ами (інакше він снепить їх сам, а при порозі 0.5 снап
-    # може бути на півкадру руху). "step" — стара поведінка.
+    # Для запису відео з калібруванням ці значення автоматично беруться з
+    # DroneLocalization до першого кадру. Після запису його візуальний селектор
+    # визначає фактичні keyframe-слоти; геометричний прогноз є лише fallback
+    # для калібрування без відео.
     keyframe_criterion: str = "overlap"
     keyframe_max_overlap: float = 0.5
     keyframe_max_gap_frames: int = 60

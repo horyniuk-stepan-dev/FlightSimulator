@@ -48,6 +48,7 @@ from simulator.physics.drone_state import DroneState
 from simulator.physics.keyframe_predictor import predict_keyframe_slots
 from simulator.terrain.surface_projection import (
     ProjectionGeometryError,
+    SurfaceCoverageError,
     project_image_pixels_to_surface,
 )
 
@@ -84,10 +85,9 @@ class CalibrationLogger:
                 ділянки добиваються проміжними якорями
             min_speed_m_s: нижче цієї швидкості напрямок руху невизначений —
                 використовується yaw
-            keyframe_criterion: "overlap" — якорі ставляться ЛИШЕ на слоти, які
-                локалізатор залишить keyframe-ами (database.keyframe_criterion
-                там мусить бути таким самим); "step" — стара поведінка, якір
-                може лягти на будь-який слот
+            keyframe_criterion: "overlap" — геометричний прогноз для
+                калібрування без відео. Коли main передає результати візуального
+                селектора, вони мають пріоритет над цим прогнозом.
             keyframe_max_overlap: МУСИТЬ збігатися з database.keyframe_max_overlap
             keyframe_max_gap_frames: МУСИТЬ збігатися з database.keyframe_max_gap_frames
         """
@@ -110,6 +110,31 @@ class CalibrationLogger:
         self._candidates: list[dict] = []
         self._frame_size: tuple[int, int] | None = None
         self._skipped_bad_h = 0
+        # Filled by the image-based selector after the encoded video is closed.
+        # This takes precedence over the geometric predictor, whose decisions
+        # can differ from DatabaseBuilder's feature/RANSAC pose chain.
+        self._exact_keyframe_slots: set[int] | None = None
+        self._exact_keyframe_provenance: dict | None = None
+
+    def set_exact_keyframe_slots(
+        self, slots: list[int], *, provenance: dict | None = None
+    ) -> None:
+        """Use the actual image-based DB selection for final anchor placement.
+
+        The caller must run the same selector as DatabaseBuilder on the final
+        encoded video. A missing/empty selection is an error: silently falling
+        back to geometric prediction would recreate off-DB anchors.
+        """
+        if not slots or any(type(slot) is not int or slot < 0 for slot in slots):
+            raise ValueError("Exact keyframe slots must be nonempty nonnegative integers")
+        if slots != sorted(set(slots)):
+            raise ValueError("Exact keyframe slots must be sorted and unique")
+        candidate_slots = {int(c["slot"]) for c in self._candidates}
+        available = candidate_slots.intersection(slots)
+        if not available:
+            raise ValueError("No selected keyframe has valid calibration geometry")
+        self._exact_keyframe_slots = set(slots)
+        self._exact_keyframe_provenance = dict(provenance or {})
 
     # ── Внутрішнє ────────────────────────────────────────────────────────────
 
@@ -256,7 +281,7 @@ class CalibrationLogger:
                 state,
                 strict_terrain=self.strict_terrain,
             )
-        except ProjectionGeometryError:
+        except (ProjectionGeometryError, SurfaceCoverageError):
             self._skipped_bad_h += 1
             return False
         pts_local = projection.local_xy
@@ -327,6 +352,11 @@ class CalibrationLogger:
 
     def _predicted_keyframe_indices(self) -> list[int]:
         """Індекси кандидатів, які локалізатор залишить keyframe-ами."""
+        if self._exact_keyframe_slots is not None:
+            return [
+                i for i, candidate in enumerate(self._candidates)
+                if int(candidate["slot"]) in self._exact_keyframe_slots
+            ]
         if self.keyframe_criterion != "overlap" or not self._candidates:
             return list(range(len(self._candidates)))
         if not self._frame_size:
@@ -353,14 +383,16 @@ class CalibrationLogger:
         Колізії (два якорі на один keyframe) розв'язуються тут же: локалізатор
         на такому дублікаті зупиняє пропагацію з помилкою.
         """
-        if self.keyframe_criterion != "overlap" or not selected:
+        if (self.keyframe_criterion != "overlap" and self._exact_keyframe_slots is None) or not selected:
             return selected
 
         kf = self._predicted_keyframe_indices()
         if not kf:
             return selected
 
-        kf_arr = np.asarray(kf, dtype=np.int64)
+        kf_slots = np.asarray(
+            [int(self._candidates[i]["slot"]) for i in kf], dtype=np.int64
+        )
         kf_set = set(kf)
         moved = 0
         dropped = 0
@@ -370,7 +402,8 @@ class CalibrationLogger:
             if idx in kf_set:
                 target = idx
             else:
-                target = int(kf_arr[np.argmin(np.abs(kf_arr - idx))])
+                anchor_slot = int(self._candidates[idx]["slot"])
+                target = kf[int(np.argmin(np.abs(kf_slots - anchor_slot)))]
                 moved += 1
             if target in out:
                 # Колізію розв'язує пріоритет причини, а не порядок слотів:
@@ -388,15 +421,14 @@ class CalibrationLogger:
 
         if dropped:
             print(
-                f"[CalibrationLogger] {dropped} anchor(s) dropped as duplicates. Причина —"
-                f" keyframe-и рідші за якорі розворотів; якщо це вадить точності,"
-                f" підніміть keyframe_max_overlap в ОБОХ проєктах (менш агресивний"
-                f" відбір → щільніші keyframe-и)."
+                f"[CalibrationLogger] {dropped} anchor(s) dropped because multiple "
+                "turn anchors resolved to the same keyframe slot."
             )
 
         if moved:
             print(
-                f"[CalibrationLogger] {moved}/{len(selected)} anchors moved onto predicted "
+                f"[CalibrationLogger] {moved}/{len(selected)} anchors moved onto "
+                f"{'image-selected' if self._exact_keyframe_slots is not None else 'predicted'} "
                 f"keyframes (overlap<={self.keyframe_max_overlap}, "
                 f"max_gap={self.keyframe_max_gap_frames}); {len(kf)}/{len(self._candidates)} "
                 f"slots are keyframes"
@@ -557,7 +589,7 @@ class CalibrationLogger:
             )
 
         data = {
-            # 2.4: додано блок keyframe_selection. Стратегія відбору кадрів
+        # 2.4: додано блок keyframe_selection. Стратегія відбору кадрів
             # тепер частина контракту між проєктами — при розбіжності порогів
             # якорі лягають на слоти без фічей, і локалізатор або зсуває їх
             # снапом, або зупиняє пропагацію на колізії.
@@ -570,6 +602,11 @@ class CalibrationLogger:
                 "max_overlap": self.keyframe_max_overlap,
                 "max_gap_frames": self.keyframe_max_gap_frames,
                 "frame_step": int(self.frame_step),
+                "source": (
+                    "database_image_selector"
+                    if self._exact_keyframe_slots is not None else "geometric_prediction"
+                ),
+                **(self._exact_keyframe_provenance or {}),
             },
             "generator": self.generator_metadata,
             "anchors": anchors,

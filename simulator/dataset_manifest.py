@@ -70,6 +70,7 @@ def write_dataset_manifest(
     configured = {
         "video": getattr(config, "video_file", ""),
         "calibration": getattr(config, "calib_file", ""),
+        "keyframes": getattr(config, "keyframe_file", ""),
         "ground_truth": getattr(config, "gt_file", ""),
         "frame_ground_truth": getattr(config, "frame_gt_file", ""),
         "telemetry": getattr(config, "telemetry_file", ""),
@@ -121,6 +122,61 @@ def write_dataset_manifest(
             errors.append(
                 f"ground truth contains {len(slots)} slots, expected {expected_slots}"
             )
+
+    keyframe_file = getattr(config, "keyframe_file", "")
+    if keyframe_file and Path(keyframe_file).exists():
+        try:
+            selection = json.loads(Path(keyframe_file).read_text(encoding="utf-8"))
+            selected = selection["selected_slots"]
+            if (
+                not isinstance(selected, list)
+                or not selected
+                or any(type(slot) is not int for slot in selected)
+                or selected != sorted(set(selected))
+            ):
+                errors.append("keyframe slots must be nonempty, sorted, unique integers")
+                selected = []
+            if int(selection["frame_step"]) != int(config.frame_step):
+                errors.append("keyframe frame_step differs from simulator frame_step")
+            expected_slots = len(range(0, frame_count, int(config.frame_step)))
+            if int(selection["total_slots"]) != expected_slots:
+                errors.append(
+                    f"keyframe sidecar contains {selection['total_slots']} candidate slots, "
+                    f"expected {expected_slots}"
+                )
+            if int(selection["source_total_frames"]) != frame_count:
+                errors.append("keyframe sidecar video frame count differs from recording")
+            if any(slot < 0 or slot >= expected_slots for slot in selected):
+                errors.append("keyframe sidecar contains an out-of-range slot")
+            featureless = selection.get("featureless_selected_slots", [])
+            if (
+                not isinstance(featureless, list)
+                or any(type(slot) is not int for slot in featureless)
+                or featureless != sorted(set(featureless))
+                or not set(featureless).issubset(selected)
+            ):
+                errors.append("featureless keyframe slots must be a sorted subset of selected slots")
+                featureless = []
+            if video_path and video_path.exists():
+                if selection["video_sha256"] != files["video"]["sha256"]:
+                    errors.append("keyframe sidecar video SHA-256 differs from recording")
+            if config.calib_file and Path(config.calib_file).exists():
+                calibration = json.loads(Path(config.calib_file).read_text(encoding="utf-8"))
+                anchor_ids = [anchor["frame_id"] for anchor in calibration["anchors"]]
+                if not anchor_ids or anchor_ids != sorted(set(anchor_ids)):
+                    errors.append("calibration anchor slots must be nonempty, sorted and unique")
+                if not set(anchor_ids).issubset(selected):
+                    missing = sorted(set(anchor_ids) - set(selected))
+                    errors.append(f"calibration anchors are absent from keyframes: {missing}")
+                if set(anchor_ids).intersection(featureless):
+                    errors.append("calibration anchors include keyframes without local features")
+                metadata = calibration.get("keyframe_selection", {})
+                if metadata.get("source") != "database_image_selector":
+                    errors.append("calibration is not marked as image-selected")
+                if int(metadata.get("frame_step", -1)) != int(config.frame_step):
+                    errors.append("calibration frame_step differs from keyframes")
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            errors.append(f"invalid keyframe/calibration contract: {exc}")
 
     frame_gt_file = getattr(config, "frame_gt_file", "")
     if frame_gt_file and Path(frame_gt_file).exists():

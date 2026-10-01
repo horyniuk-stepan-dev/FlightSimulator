@@ -10,6 +10,7 @@ import numpy as np
 
 from simulator.terrain.surface_projection import (
     ProjectionGeometryError,
+    SurfaceCoverageError,
     project_image_pixels_to_surface,
 )
 
@@ -128,7 +129,7 @@ class FrameGroundTruthLogger:
                     ),
                     camera_agl_m=float(result.camera_agl_m),
                 )
-            except ProjectionGeometryError as exc:
+            except (ProjectionGeometryError, SurfaceCoverageError) as exc:
                 record["invalid_reason"] = str(exc)
         else:
             record["invalid_reason"] = "renderer did not produce a projection matrix"

@@ -11,6 +11,7 @@ import numpy as np
 
 from simulator.control.command_source import CommandSource, CommandVector
 from simulator.physics.drone_state import DroneState
+from simulator.planning.survey_planner import Waypoint
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,9 @@ class FlightScenario:
     roll_deg: LinearProfile
     yaw_deg: LinearProfile
     source_path: str
+    # Optional horizontal route in local map metres (x east, y north, map centre
+    # at 0,0). Without it the drone flies the survey lawnmower of the references.
+    route_xy: tuple[tuple[float, float], ...] = ()
 
     @classmethod
     def load(cls, path: str | Path) -> "FlightScenario":
@@ -65,6 +69,18 @@ class FlightScenario:
         if not math.isfinite(duration) or duration <= 0:
             raise ValueError("Scenario duration_s must be finite and positive")
         profiles = data.get("profiles", {})
+        route_xy: tuple[tuple[float, float], ...] = ()
+        if data.get("route") is not None:
+            route = data["route"]
+            if not isinstance(route, list) or len(route) < 2:
+                raise ValueError("Scenario route needs at least two points")
+            points = []
+            for item in route:
+                x, y = float(item["x_m"]), float(item["y_m"])
+                if not (math.isfinite(x) and math.isfinite(y)):
+                    raise ValueError("Scenario route contains non-finite coordinates")
+                points.append((x, y))
+            route_xy = tuple(points)
         result = cls(
             name=str(data.get("name") or source.stem),
             duration_s=duration,
@@ -75,6 +91,7 @@ class FlightScenario:
             roll_deg=LinearProfile(profiles.get("roll_deg"), name="roll_deg"),
             yaw_deg=LinearProfile(profiles.get("yaw_deg"), name="yaw_deg"),
             source_path=str(source.resolve()),
+            route_xy=route_xy,
         )
         for profile_name in ("altitude_m", "pitch_deg", "roll_deg", "yaw_deg"):
             profile = getattr(result, profile_name)
@@ -85,6 +102,37 @@ class FlightScenario:
         if min(k.value for k in result.altitude_m.keyframes) <= 0:
             raise ValueError("Scenario altitude_m must remain positive")
         return result
+
+    def max_tilt_deg(self) -> float:
+        values = [abs(k.value) for p in (self.pitch_deg, self.roll_deg) for k in p.keyframes]
+        return max(values, default=0.0)
+
+    def route_waypoints(self, bounds_local, footprint_at) -> list[Waypoint]:
+        """The scenario route as waypoints, refused if any point is near the map edge.
+
+        A point is accepted when the camera footprint at the scenario's highest
+        altitude (half diagonal), shifted by its largest pitch/roll, stays on the
+        map. ``footprint_at(altitude_m) -> (width_m, height_m)``.
+        """
+        max_altitude = max(k.value for k in self.altitude_m.keyframes)
+        width, height = footprint_at(max_altitude)
+        margin = math.hypot(width, height) / 2 + max_altitude * math.tan(
+            math.radians(self.max_tilt_deg())
+        )
+        x_min, y_min, x_max, y_max = bounds_local
+        outside = [
+            (x, y)
+            for x, y in self.route_xy
+            if not (x_min + margin <= x <= x_max - margin and y_min + margin <= y <= y_max - margin)
+        ]
+        if outside:
+            raise ValueError(
+                f"Scenario route points too close to the map edge (margin {margin:.0f} m; "
+                f"usable x {x_min + margin:.0f}..{x_max - margin:.0f}, "
+                f"y {y_min + margin:.0f}..{y_max - margin:.0f}): {outside}"
+            )
+        start_altitude = self.altitude_m.value_at(0.0)
+        return [Waypoint(x, y, start_altitude) for x, y in self.route_xy]
 
 
 class ProfiledCommandSource(CommandSource):

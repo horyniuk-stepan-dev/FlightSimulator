@@ -4,9 +4,13 @@ Ties together physics, rendering, planning, and control.
 """
 
 import argparse
+import json
 import math
+import os
 import random
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -34,6 +38,135 @@ from simulator.physics.frame_ground_truth import FrameGroundTruthLogger
 from simulator.dataset_manifest import write_dataset_manifest
 
 
+def _configure_console_encoding() -> None:
+    """Prevent Windows console encoding from aborting dataset finalisation."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                # Captured/test streams can reject a runtime encoding change.
+                pass
+
+
+def _database_selector_runtime() -> tuple[Path, Path]:
+    """Find the sibling localization project and its own model-enabled Python.
+
+    The simulator must use DatabaseBuilder's image-feature selection code,
+    rather than infer keyframes from its ground-truth camera matrices. Paths
+    may be overridden when the repositories are not adjacent.
+    """
+    default_root = Path(__file__).resolve().parents[2] / "DroneLocalization"
+    root = Path(os.environ.get("DRONE_LOCALIZATION_ROOT", default_root)).resolve()
+    default_python = root / (".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python")
+    python = Path(os.environ.get("DRONE_LOCALIZATION_PYTHON", default_python)).resolve()
+    script = Path(__file__).resolve().parent / "localizer_keyframe_cli.py"
+    if not script.is_file() or not python.is_file():
+        raise RuntimeError(
+            "Cannot run the database image selector: expected "
+            f"{script} and {python}. Set DRONE_LOCALIZATION_ROOT and/or "
+            "DRONE_LOCALIZATION_PYTHON to the localization installation."
+        )
+    return root, python
+
+
+def _call_database_selector(
+    root: Path, python: Path, *args: str
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["DRONE_LOCALIZATION_ROOT"] = str(root)
+    simulator_root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, (simulator_root, env.get("PYTHONPATH", "")))
+    )
+    # Per-frame model logs can be large on long recordings. Keep them off the
+    # parent process's memory while preserving a useful error tail on failure.
+    with tempfile.TemporaryFile(mode="w+b") as diagnostic_stream:
+        result = subprocess.run(
+            [str(python), "-m", "simulator.localizer_keyframe_cli", *args],
+            cwd=root,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=diagnostic_stream,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if result.returncode:
+            diagnostic_stream.seek(0, os.SEEK_END)
+            diagnostic_stream.seek(max(0, diagnostic_stream.tell() - 4096))
+            details = diagnostic_stream.read().decode("utf-8", errors="replace").strip()
+            if not details:
+                details = result.stdout.strip()
+            raise RuntimeError(
+                f"Database image selector failed (exit {result.returncode}): "
+                f"{details[-3000:]}"
+            )
+    return result
+
+
+def _database_selector_settings(root: Path, python: Path) -> dict:
+    result = _call_database_selector(root, python, "--print-config")
+    try:
+        settings = json.loads(result.stdout)
+        frame_step = settings["frame_step"]
+        criterion = settings["criterion"]
+        max_overlap = settings["max_overlap"]
+        max_gap_frames = settings["max_gap_frames"]
+        if (
+            type(frame_step) is not int or frame_step < 1
+            or criterion not in ("step", "overlap")
+            or not 0.0 <= float(max_overlap) <= 1.0
+            or type(max_gap_frames) is not int or max_gap_frames < 0
+        ):
+            raise ValueError("invalid selector settings")
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Database selector returned invalid settings JSON") from exc
+    return settings
+
+
+def _select_encoded_video_keyframes(
+    *, root: Path, python: Path, video_file: str, output_file: str,
+    expected_frames: int, expected_settings: dict,
+) -> dict:
+    _call_database_selector(
+        root, python, "--video", str(Path(video_file).resolve()),
+        "--output", str(Path(output_file).resolve()),
+    )
+    try:
+        data = json.loads(Path(output_file).read_text(encoding="utf-8"))
+        selected = data["selected_slots"]
+        featureless = data.get("featureless_selected_slots", [])
+        frame_step = int(expected_settings["frame_step"])
+        total_slots = (expected_frames + frame_step - 1) // frame_step
+        if (
+            data["frame_step"] != frame_step
+            or data["source_total_frames"] != expected_frames
+            or data["total_slots"] != total_slots
+            or data["selection_settings"] != expected_settings["selection_settings"]
+            or not isinstance(selected, list)
+            or not selected
+            or any(type(slot) is not int or not 0 <= slot < total_slots for slot in selected)
+            or selected != sorted(set(selected))
+            or not isinstance(featureless, list)
+            or any(type(slot) is not int for slot in featureless)
+            or not set(featureless).issubset(selected)
+            or not isinstance(data["video_sha256"], str)
+            or len(data["video_sha256"]) != 64
+        ):
+            raise ValueError("selection contract does not match recorded video/config")
+        usable = sorted(set(selected) - set(featureless))
+        if not usable:
+            raise ValueError("selector found no keyframes with local features")
+        data["usable_anchor_slots"] = usable
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Database selector returned an invalid keyframe sidecar") from exc
+    return data
+
+
 def parse_args() -> SimulatorConfig:
     parser = argparse.ArgumentParser(description="Drone Flight Simulator")
 
@@ -41,25 +174,25 @@ def parse_args() -> SimulatorConfig:
     parser.add_argument(
         "--lat_min",
         type=float,
-        default=48.364964,
+        default=48.39950223106055,
         help="Minimum latitude (South)",
     )
     parser.add_argument(
         "--lon_min",
         type=float,
-        default=26.062876,
+        default=26.102003186115134,
         help="Minimum longitude (West)",
     )
     parser.add_argument(
         "--lat_max",
         type=float,
-        default=48.402230,
+        default=48.44349548338706,
         help="Maximum latitude (North)",
     )
     parser.add_argument(
         "--lon_max",
         type=float,
-        default=26.116208,
+        default=26.257266910369705,
         help="Maximum longitude (East)",
     )
     parser.add_argument("--zoom", type=int, default=17, help="Map tile zoom level")
@@ -290,33 +423,32 @@ def parse_args() -> SimulatorConfig:
         "--frame-step",
         type=int,
         default=30,
-        help="Frame step to sync calibration indices with Topometric Database "
-        "(МУСИТЬ збігатися з database.frame_step системи локалізації)",
+        help="Крок слотів; для запису відео з калібруванням автоматично "
+        "береться з чинної конфігурації DroneLocalization",
     )
     parser.add_argument(
         "--keyframe-criterion",
         dest="keyframe_criterion",
         choices=["overlap", "step"],
         default="overlap",
-        help="Стратегія відбору кадрів для якорів. overlap — ставити якорі лише "
-        "на слоти, які локалізатор залишить keyframe-ами (МУСИТЬ збігатися з "
-        "database.keyframe_criterion); step — стара поведінка",
+        help="Стратегія відбору; для запису відео з калібруванням автоматично "
+        "береться з DroneLocalization, а слоти обчислює його візуальний селектор",
     )
     parser.add_argument(
         "--keyframe-max-overlap",
         dest="keyframe_max_overlap",
         type=float,
         default=0.5,
-        help="Поріг перекриття для criterion=overlap "
-        "(МУСИТЬ збігатися з database.keyframe_max_overlap)",
+        help="Поріг перекриття; для запису відео з калібруванням "
+        "береться з DroneLocalization",
     )
     parser.add_argument(
         "--keyframe-max-gap-frames",
         dest="keyframe_max_gap_frames",
         type=int,
         default=60,
-        help="Скільки слотів поспіль можна пропустити до примусового keyframe "
-        "(МУСИТЬ збігатися з database.keyframe_max_gap_frames)",
+        help="Найбільша кількість пропущених слотів; для запису відео з "
+        "калібруванням береться з DroneLocalization",
     )
     parser.add_argument(
         "--anchor-spacing-slots",
@@ -355,12 +487,31 @@ def parse_args() -> SimulatorConfig:
 
 
 def main():
+    _configure_console_encoding()
     print("=== Drone Flight Simulator ===")
     cfg = parse_args()
     if cfg.target_fps <= 0:
         raise ValueError("--fps must be positive")
     if cfg.max_frames < 0:
         raise ValueError("--max-frames cannot be negative")
+    selector_runtime: tuple[Path, Path] | None = None
+    selector_settings: dict | None = None
+    if cfg.video_file and cfg.calib_file:
+        # Resolve the effective DB settings before producing a single frame.
+        # A missing selector must stop the run early, not leave apparently
+        # valid calibration that the database cannot use.
+        selector_runtime = _database_selector_runtime()
+        selector_settings = _database_selector_settings(*selector_runtime)
+        cfg.frame_step = selector_settings["frame_step"]
+        cfg.keyframe_criterion = selector_settings["criterion"]
+        cfg.keyframe_max_overlap = selector_settings["max_overlap"]
+        cfg.keyframe_max_gap_frames = selector_settings["max_gap_frames"]
+        cfg.keyframe_file = str(Path(cfg.video_file).with_suffix(".keyframes.json"))
+        print(
+            "Calibration will use the database image selector "
+            f"(step={cfg.frame_step}, criterion={cfg.keyframe_criterion}, "
+            f"overlap={cfg.keyframe_max_overlap}, gap={cfg.keyframe_max_gap_frames})."
+        )
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     if cfg.video_file and not cfg.frame_gt_file:
@@ -440,14 +591,32 @@ def main():
     # 4. Control setup
     if cfg.mode in ("auto", "semi", "record"):
         print(f"Generating survey path for {cfg.mode} mode...")
-        waypoints = SurveyPlanner.generate_path(
-            bounds_local=bounds,
-            altitude_m=cfg.altitude_m,
-            camera=camera,
-            overlap_percent=cfg.overlap_percent,
-            grid_angle_deg=cfg.grid_angle_deg,
-        )
-        print(f"Generated {len(waypoints)} waypoints.")
+        max_alt = cfg.altitude_m
+        max_pitch = 0.0
+        max_roll = 0.0
+        if scenario is not None:
+            if scenario.altitude_m.keyframes:
+                max_alt = max(k.value for k in scenario.altitude_m.keyframes)
+            if scenario.pitch_deg.keyframes:
+                max_pitch = max(abs(k.value) for k in scenario.pitch_deg.keyframes)
+            if scenario.roll_deg.keyframes:
+                max_roll = max(abs(k.value) for k in scenario.roll_deg.keyframes)
+
+        if scenario is not None and scenario.route_xy:
+            waypoints = scenario.route_waypoints(bounds, camera.footprint_meters)
+            print(f"Scenario route: {len(waypoints)} waypoints.")
+        else:
+            waypoints = SurveyPlanner.generate_path(
+                bounds_local=bounds,
+                altitude_m=cfg.altitude_m,
+                camera=camera,
+                overlap_percent=cfg.overlap_percent,
+                grid_angle_deg=cfg.grid_angle_deg,
+                margin_altitude_m=max_alt,
+                max_pitch_deg=max_pitch,
+                max_roll_deg=max_roll,
+            )
+            print(f"Generated {len(waypoints)} waypoints.")
 
         if cfg.mode in ("auto", "record"):
             hold_rad = (
@@ -456,7 +625,12 @@ def main():
                 else None
             )
             command_source = AutoPilot(
-                waypoints, speed_m_s=cfg.speed_m_s, hold_heading_rad=hold_rad
+                waypoints,
+                speed_m_s=cfg.speed_m_s,
+                hold_heading_rad=hold_rad,
+                # A scenario owns the altitude: the route must keep flying
+                # instead of stalling at a leg end while off survey altitude.
+                horizontal_only=scenario is not None,
             )
         else:
             manual = ManualControl(
@@ -542,6 +716,7 @@ def main():
                 "gt_file": cfg.gt_file,
                 "frame_gt_file": cfg.frame_gt_file,
                 "scenario": scenario.source_path if scenario is not None else None,
+                "keyframe_file": cfg.keyframe_file or None,
             },
         )
     else:
@@ -740,31 +915,67 @@ def main():
         run_status = "failed"
         raise
     finally:
+        finalization_error = None
         for sink in sinks:
             if hasattr(sink, "cleanup"):
                 sink.cleanup()
         cv2.destroyAllWindows()
         telemetry_logger.close()
-        if calib_logger:
-            calib_logger.close()
-            if cfg.gt_file:
-                calib_logger.dump_ground_truth(cfg.gt_file, fps=cfg.target_fps)
         if frame_gt_logger:
             frame_gt_logger.close()
         if video_sink:
             video_sink.cleanup()
+        if calib_logger:
+            try:
+                if selector_runtime is not None and selector_settings is not None:
+                    if video_frame_idx <= 0:
+                        raise RuntimeError("No recorded video frames for image keyframe selection")
+                    selected = _select_encoded_video_keyframes(
+                        root=selector_runtime[0],
+                        python=selector_runtime[1],
+                        video_file=cfg.video_file,
+                        output_file=cfg.keyframe_file,
+                        expected_frames=video_frame_idx,
+                        expected_settings=selector_settings,
+                    )
+                    calib_logger.set_exact_keyframe_slots(
+                        selected["usable_anchor_slots"],
+                        provenance={
+                            "sidecar": cfg.keyframe_file,
+                            "video_sha256": selected["video_sha256"],
+                        },
+                    )
+                    print(
+                        "Image selector kept "
+                        f"{len(selected['selected_slots'])}/{selected['total_slots']} slots "
+                        f"({len(selected['usable_anchor_slots'])} with local features)."
+                    )
+                calib_logger.close()
+                if cfg.gt_file:
+                    calib_logger.dump_ground_truth(cfg.gt_file, fps=cfg.target_fps)
+            except Exception as exc:
+                run_status = "failed"
+                finalization_error = exc
+                print(f"Calibration finalization failed: {exc}", file=sys.stderr)
         manifest_path = cfg.manifest_file
         if not manifest_path and cfg.video_file:
             manifest_path = str(Path(cfg.video_file).with_suffix(".manifest.json"))
         if manifest_path:
-            write_dataset_manifest(
+            manifest = write_dataset_manifest(
                 manifest_path,
                 status=run_status,
                 config=cfg,
                 renderer=renderer.renderer_name,
                 frame_count=video_frame_idx,
             )
+            if run_status == "complete" and manifest["status"] != "complete" and finalization_error is None:
+                finalization_error = RuntimeError(
+                    "Dataset manifest validation failed: "
+                    + "; ".join(manifest["validation_errors"][:3])
+                )
         print("Simulation ended.")
+        if finalization_error is not None:
+            raise RuntimeError("Simulator recording did not produce a valid dataset") from finalization_error
 
 
 if __name__ == "__main__":

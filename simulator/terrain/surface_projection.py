@@ -13,7 +13,7 @@ class ProjectionGeometryError(ValueError):
     """The camera homography cannot be inverted for the requested pixels."""
 
 
-class SurfaceCoverageError(ValueError):
+class SurfaceCoverageError(ProjectionGeometryError):
     """The requested surface point is outside valid DEM coverage."""
 
 

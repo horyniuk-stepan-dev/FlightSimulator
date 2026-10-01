@@ -105,6 +105,8 @@ def _download_raster(
             zoom=zoom,
             source=provider,
             ll=True,
+            n_connections=16,
+            use_cache=False,
         )
     finally:
         tracker.stop()

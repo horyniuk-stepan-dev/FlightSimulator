@@ -19,6 +19,7 @@ class AutoPilot(CommandSource):
         speed_m_s: float = 5.0,
         arrival_threshold_m: float = 150.0,
         hold_heading_rad: float | None = None,
+        horizontal_only: bool = False,
     ):
         self.waypoints = waypoints
         self.speed = speed_m_s
@@ -27,6 +28,12 @@ class AutoPilot(CommandSource):
         # дрона у survey-місії) — кадри всіх ніг серпантину мають ОДНАКОВУ
         # орієнтацію, матчинг локалізатора не деградує на розворотах.
         self.hold_heading = hold_heading_rad
+        # Scenario runs own the altitude profile (ProfiledCommandSource sets vz),
+        # so waypoint arrival and cruise speed must be horizontal. With the 3-D
+        # check a waypoint is never "reached" while the profile keeps the drone
+        # more than arrival_threshold_m above/below the survey altitude: the
+        # route stalled at a leg end and the drone hovered in place.
+        self.horizontal_only = horizontal_only
         
         self.current_wp_idx = 0
         self._finished = len(waypoints) == 0
@@ -53,7 +60,7 @@ class AutoPilot(CommandSource):
         # Calculate vector to target
         dx = target.x - state.position[0]
         dy = target.y - state.position[1]
-        dz = target.z - state.position[2]
+        dz = 0.0 if self.horizontal_only else target.z - state.position[2]
         
         dist_xy = math.hypot(dx, dy)
         dist_total = math.hypot(dist_xy, dz)
@@ -67,7 +74,7 @@ class AutoPilot(CommandSource):
             target = self.waypoints[self.current_wp_idx]
             dx = target.x - state.position[0]
             dy = target.y - state.position[1]
-            dz = target.z - state.position[2]
+            dz = 0.0 if self.horizontal_only else target.z - state.position[2]
             dist_xy = math.hypot(dx, dy)
             dist_total = math.hypot(dist_xy, dz)
 
