@@ -1,0 +1,182 @@
+{
+ "version": 1,
+ "name": "vlad_vocab_survey",
+ "description": "5-minute zigzag survey for building a VLAD vocabulary in any region (run_vocab_regions.py): route 21.4 km in local map metres (x east, y north, map centre 0,0), altitude 600-2000 m so the frames span the GSD of all reference layers (vertical rate <= 20 m/s), camera pitch -10..+12 deg and roll -8..+8 deg, yaw 0 (north-up like the heading-hold references). Needs a map of at least about 7.8 x 7.8 km (route half-extent 2600 m + margin ~1.2 km at 2000 m with 12 deg tilt); run_vocab_regions.py uses 8.6 x 8.6 km. Speed comes from --speed (70 m/s covers the route in ~306 s). Extra keys (description, phases) are ignored by the loader.",
+ "duration_s": 300.0,
+ "phases": [
+  {
+   "from_s": 0,
+   "to_s": 70,
+   "label": "climb_700_2000"
+  },
+  {
+   "from_s": 70,
+   "to_s": 110,
+   "label": "hold_2000"
+  },
+  {
+   "from_s": 110,
+   "to_s": 180,
+   "label": "descend_2000_600"
+  },
+  {
+   "from_s": 180,
+   "to_s": 220,
+   "label": "hold_600"
+  },
+  {
+   "from_s": 220,
+   "to_s": 265,
+   "label": "climb_600_1400"
+  },
+  {
+   "from_s": 265,
+   "to_s": 300,
+   "label": "hold_1400"
+  }
+ ],
+ "route": [
+  {
+   "x_m": -2600.0,
+   "y_m": -2600.0
+  },
+  {
+   "x_m": 2600.0,
+   "y_m": -1300.0
+  },
+  {
+   "x_m": -2600.0,
+   "y_m": 0.0
+  },
+  {
+   "x_m": 2600.0,
+   "y_m": 1300.0
+  },
+  {
+   "x_m": -2600.0,
+   "y_m": 2600.0
+  }
+ ],
+ "profiles": {
+  "altitude_m": [
+   {
+    "time_s": 0.0,
+    "value": 700.0
+   },
+   {
+    "time_s": 70.0,
+    "value": 2000.0
+   },
+   {
+    "time_s": 110.0,
+    "value": 2000.0
+   },
+   {
+    "time_s": 180.0,
+    "value": 600.0
+   },
+   {
+    "time_s": 220.0,
+    "value": 600.0
+   },
+   {
+    "time_s": 265.0,
+    "value": 1400.0
+   },
+   {
+    "time_s": 300.0,
+    "value": 1400.0
+   }
+  ],
+  "pitch_deg": [
+   {
+    "time_s": 0.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 30.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 45.0,
+    "value": 10.0
+   },
+   {
+    "time_s": 70.0,
+    "value": 10.0
+   },
+   {
+    "time_s": 85.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 130.0,
+    "value": -10.0
+   },
+   {
+    "time_s": 150.0,
+    "value": -10.0
+   },
+   {
+    "time_s": 165.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 230.0,
+    "value": 12.0
+   },
+   {
+    "time_s": 250.0,
+    "value": 12.0
+   },
+   {
+    "time_s": 262.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 300.0,
+    "value": 0.0
+   }
+  ],
+  "roll_deg": [
+   {
+    "time_s": 0.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 95.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 105.0,
+    "value": 8.0
+   },
+   {
+    "time_s": 120.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 190.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 200.0,
+    "value": -8.0
+   },
+   {
+    "time_s": 212.0,
+    "value": 0.0
+   },
+   {
+    "time_s": 300.0,
+    "value": 0.0
+   }
+  ],
+  "yaw_deg": [
+   {
+    "time_s": 0.0,
+    "value": 0.0
+   }
+  ]
+ }
+}
