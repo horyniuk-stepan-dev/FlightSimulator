@@ -27,6 +27,7 @@ class SurveyPlanner:
         margin_altitude_m: float | None = None,
         max_pitch_deg: float = 0.0,
         max_roll_deg: float = 0.0,
+        spacing_altitude_m: float | None = None,
     ) -> list[Waypoint]:
         """
         Generate a lawnmower path over the given area.
@@ -40,14 +41,26 @@ class SurveyPlanner:
             margin_altitude_m: Highest altitude during flight for edge safety margins.
             max_pitch_deg: Maximum pitch magnitude (degrees) during flight.
             max_roll_deg: Maximum roll magnitude (degrees) during flight.
+            spacing_altitude_m: Camera height above the ground used for the line
+                spacing. Over relief pass the LOWEST height above the terrain
+                (flight height minus the highest terrain): the footprint shrinks
+                over hills, and spacing from the flight height would leave less
+                overlap than requested there. None = ``altitude_m`` (flat ground).
 
         Returns:
             List of Waypoints.
         """
         x_min, y_min, x_max, y_max = bounds_local
 
-        # Compute camera footprint width and height at flight altitude
-        footprint_w, footprint_h = camera.footprint_meters(altitude_m)
+        # Camera footprint at the height that sets the line spacing: the lowest
+        # height above the terrain, so the requested overlap holds over hills too.
+        spacing_altitude = altitude_m if spacing_altitude_m is None else spacing_altitude_m
+        if spacing_altitude <= 0:
+            raise ValueError(
+                f"Survey spacing height must be positive, got {spacing_altitude:.1f} m "
+                "(flight below the highest terrain?)"
+            )
+        footprint_w, footprint_h = camera.footprint_meters(spacing_altitude)
         
         # Calculate line spacing based on overlap
         overlap_ratio = max(0.0, min(overlap_percent / 100.0, 0.99))

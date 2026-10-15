@@ -138,6 +138,12 @@ class CalibrationLogger:
 
     # ── Внутрішнє ────────────────────────────────────────────────────────────
 
+    def _altitude_msl(self, state) -> float | None:
+        """Camera height above sea level (DEM datum); None without a DEM."""
+        if getattr(self.ortho_map, "elevation", None) is None:
+            return None
+        return float(state.altitude) + float(getattr(self.ortho_map, "base_elevation", 0.0))
+
     def _movement_heading(self, state: DroneState) -> float:
         """Напрямок руху камери (рад): вектор швидкості, fallback — yaw."""
         vx, vy = float(state.velocity[0]), float(state.velocity[1])
@@ -315,6 +321,7 @@ class CalibrationLogger:
                 "heading": self._movement_heading(state),
                 "yaw_deg": math.degrees(state.yaw),
                 "alt": float(state.altitude),
+                "alt_msl": self._altitude_msl(state),
                 "camera_agl": camera_agl,
                 "camera_position": np.asarray(state.position, dtype=float).tolist(),
                 "camera_orientation_xyzw": np.asarray(
@@ -496,6 +503,7 @@ class CalibrationLogger:
                     "heading_deg": float(math.degrees(c["heading"])),
                     "yaw_deg": float(c["yaw_deg"]),
                     "alt": float(c["alt"]),
+                    "alt_msl": c.get("alt_msl"),
                     "rmse_m": float(c["rmse"]),
                     "is_anchor": idx in selected,
                     "anchor_reason": selected.get(idx),
@@ -514,7 +522,11 @@ class CalibrationLogger:
             ],
             "coordinate_contract": {
                 "world_xy": "local ground-plane metres, Mercator scale corrected at map centre",
-                "world_z": "height above the simulator base plane",
+                "world_z": (
+                    "height above the simulator base plane = the map's lowest DEM point "
+                    "(generator.vertical.base_elevation_m above sea level); alt_msl = "
+                    "world_z + base_elevation_m"
+                ),
                 "ground_center": "direct centre-ray surface intersection",
                 "affine": "five-point least-squares compatibility approximation",
             },

@@ -82,6 +82,11 @@ class FrameGroundTruthLogger:
                 state.quaternion, dtype=float
             ).tolist(),
             "camera_altitude_base_m": float(state.altitude),
+            "camera_altitude_msl_m": (
+                float(state.altitude) + float(getattr(self.ortho_map, "base_elevation", 0.0))
+                if getattr(self.ortho_map, "elevation", None) is not None
+                else None
+            ),
             "surface_valid_fraction": float(surface_valid_fraction),
             "renderer": self.renderer,
             "scenario": self.scenario,
@@ -89,6 +94,11 @@ class FrameGroundTruthLogger:
                 "world_xy": "local ground-plane metres, Mercator scale corrected at map centre",
                 "world_z": "height above simulator base plane",
                 "vertical_datum": "inherited from source DEM; not inferred by simulator",
+                "base_elevation_m": (
+                    float(getattr(self.ortho_map, "base_elevation", 0.0))
+                    if getattr(self.ortho_map, "elevation", None) is not None
+                    else None
+                ),
                 "reference_gps": getattr(self.ortho_map, "reference_gps", None),
             },
             "ground_center_valid": False,

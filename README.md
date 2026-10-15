@@ -89,8 +89,25 @@ GT створюються лише для базових шарів; запит�
   маніфесті.
 - Локальні X/Y — наземні метри з поправкою масштабу Web Mercator у центрі
   карти. Експорт Web Mercator виконується окремим перетворенням.
-- Z — висота над базовою площиною симулятора. AGL обчислюється з DEM під
-  камерою. Вертикальний datum вхідного DEM симулятор не вгадує.
+- Z — висота над базовою площиною симулятора = найнижча точка DEM карти. AGL
+  обчислюється з DEM під камерою. Вертикальний datum вхідного DEM симулятор не
+  вгадує (Terrarium — висоти над рівнем моря).
+- Висоти `--altitude` і сценарію читаються від базової площини
+  (`--altitude-reference base`, за замовчуванням) або від рівня моря за DEM
+  (`--altitude-reference msl`); `--altitude-offset` додається до них.
+  `ground_truth.json` і покадровий GT містять висоту камери над рівнем моря
+  (`alt_msl`, `camera_altitude_msl_m`) і `generator.vertical.base_elevation_m`.
+- Ями й піки DEM (порожнечі Terrarium: до −2405 м серед 75–264 м біля Канева)
+  замінюються медіаною околу 7×7 до вибору базової площини; інакше одна така
+  точка опускає Z=0 на сотні метрів і політ «600 м» проходить крізь рельєф.
+- Перед записом симулятор прогнозує висоту камери над рельєфом уздовж маршруту
+  і перевіряє її на кожному кадрі; менше `--min-clearance` (50 м) — помилка з
+  потрібним `--altitude-offset`. Відстань між галсами рахується з найменшої
+  висоти над рельєфом (над найвищою точкою карти), щоб перекриття трималось і
+  над пагорбами; `--flat-spacing` повертає старий розрахунок від Z=0.
+- Якорі калібрування й GT уже проєктуються на поверхню рельєфу з тим самим
+  паралаксом, що й рендер (`terrain/parallax.py`); візуальний відбір keyframe-ів
+  працює по відрендереному відео, тож перекриття кадрів у базі враховує рельєф.
 - Ортофото й DEM зв'язуються через їхні CRS та affine transform. Вихід за DEM,
   `nodata`, горизонт і промені позаду камери не підміняються краєм растра.
 - `--elevation-format auto` розрізняє RGB Terrarium і одноканальний DEM у
@@ -111,6 +128,7 @@ $env:PYTHONUTF8 = "1"
 & $python test_ground_truth_export.py
 & $python test_keyframe_predictor.py
 & $python test_parallax_calibration.py
+& $python -m pytest -q test_terrain_altitude.py
 & $python -m pytest -q test_database_keyframe_contract.py test_dataset_manifest_keyframes.py
 & '..\DroneLocalization\.venv\Scripts\python.exe' -m pytest -q test_database_keyframe_scan.py
 ```

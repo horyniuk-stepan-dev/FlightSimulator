@@ -5,9 +5,14 @@ the test area it is map-specific and makes the test look better than it is (AnyL
 arXiv 2308.00688, Table V: aerial R@1 domain-specific 76.2 vs map-specific 62.9).
 Each region gets a ~8.6 x 8.6 km map and flies scenarios/vlad_vocab_survey.json
 (5 min, 600-2000 m, small pitch/roll), so one video spans the GSD of all layers.
+Altitudes are above sea level by default (--altitude-reference msl): the simulator
+predicts the camera height above the terrain along the route and refuses a flight
+that would come closer than its --min-clearance (50 m), as 600 m would in the
+foothills (terrain up to ~760 m) — record those with --altitude-offset.
 
     python run_vocab_regions.py                      # the four default regions
     python run_vocab_regions.py --only steppe
+    python run_vocab_regions.py --only foothills --altitude-offset 600 --force
     python run_vocab_regions.py --region delta=45.45,29.60
 
 Rendering is forced onto the GPU (--renderer gpu: the simulator stops instead of
@@ -33,7 +38,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from run_parallel_bochkivtsi import PYTHON_EXE, ROOT_DIR, get_current_frame
+from run_parallel_bochkivtsi import PYTHON_EXE, ROOT_DIR, JobMonitor
 
 # Region centres (lat, lon): rural landscapes away from the test area.
 REGIONS: dict[str, tuple[float, float]] = {
@@ -125,6 +130,19 @@ def parse_args(argv=None):
     parser.add_argument("--speed", type=float, default=70.0, help="m/s (default 70: the route in ~306 s)")
     parser.add_argument("--scenario", default=DEFAULT_SCENARIO)
     parser.add_argument(
+        "--altitude-reference",
+        choices=["msl", "base"],
+        default="msl",
+        help="scenario altitudes above sea level (default) or above the map's lowest DEM point",
+    )
+    parser.add_argument(
+        "--altitude-offset",
+        type=float,
+        default=0.0,
+        help="metres added to every scenario altitude (e.g. 600 for foothills, where the "
+        "terrain reaches ~760 m and a 600 m flight above sea level would hit it)",
+    )
+    parser.add_argument(
         "--jobs",
         type=int,
         default=1,
@@ -165,6 +183,8 @@ def build_command(task: dict, args) -> list[str]:
         PYTHON_EXE, "-u", "-m", "simulator.main",
         "--mode", "record",
         "--scenario", str(args.scenario),
+        "--altitude-reference", args.altitude_reference,
+        "--altitude-offset", f"{args.altitude_offset:g}",
         "--speed", str(args.speed),
         "--zoom", str(args.zoom),
         "--lat_min", f"{lat_min:.6f}", "--lon_min", f"{lon_min:.6f}",
@@ -219,7 +239,8 @@ def main(argv=None) -> int:
                     stdout=task["log"],
                     stderr=subprocess.STDOUT,
                 )
-                task["start"] = time.time()
+                task["start"] = task["start_time"] = time.time()
+                task["monitor"] = JobMonitor(task)
                 lat_min, lon_min, lat_max, lon_max = task["bbox"]
                 print(
                     f"[{datetime.now():%H:%M:%S}] start {task['name']} "
@@ -239,13 +260,11 @@ def main(argv=None) -> int:
                     f"[{datetime.now():%H:%M:%S}] {task['name']}: exit {code} after {minutes:.1f} min, "
                     f"renderer {recorded_renderer(task['output_dir'])}"
                 )
-            if running and time.time() - last_print >= 15:
-                last_print = time.time()
-                states = []
+            if running and time.time() - last_print >= 30:
+                last_print = now = time.time()
+                print(f"[{datetime.now():%H:%M:%S}]")
                 for task in running:
-                    frame, state = get_current_frame(task["output_dir"])
-                    states.append(f"{task['name']}: {frame} frames" if frame > 0 else f"{task['name']}: {state}")
-                print(f"[{datetime.now():%H:%M:%S}] " + " | ".join(states))
+                    print(f"  {task['name']}: {task['monitor'].status(now)}")
     except KeyboardInterrupt:
         print("\nStopping...")
         for task in running:

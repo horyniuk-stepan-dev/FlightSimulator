@@ -4,6 +4,7 @@ Ties together physics, rendering, planning, and control.
 """
 
 import argparse
+import itertools
 import json
 import math
 import os
@@ -27,6 +28,13 @@ from simulator.control.auto_pilot import AutoPilot
 from simulator.control.semi_auto_control import SemiAutoControl
 from simulator.planning.survey_planner import SurveyPlanner
 from simulator.planning.scenario import FlightScenario, ProfiledCommandSource
+from simulator.planning.altitude import (
+    TerrainClearanceError,
+    altitude_shift_m,
+    camera_clearance_m,
+    predicted_route_clearance,
+    relief_top_above_base,
+)
 from simulator.display.hud import HUD
 from simulator.display.frame_sink import DisplaySink
 from simulator.display.video_sink import VideoWriterSink
@@ -81,31 +89,65 @@ def _call_database_selector(
     env["PYTHONPATH"] = os.pathsep.join(
         filter(None, (simulator_root, env.get("PYTHONPATH", "")))
     )
-    # Per-frame model logs can be large on long recordings. Keep them off the
-    # parent process's memory while preserving a useful error tail on failure.
-    with tempfile.TemporaryFile(mode="w+b") as diagnostic_stream:
-        result = subprocess.run(
-            [str(python), "-m", "simulator.localizer_keyframe_cli", *args],
-            cwd=root,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=diagnostic_stream,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        if result.returncode:
+    return _run_selector_process(
+        [str(python), "-m", "simulator.localizer_keyframe_cli", *args], root, env
+    )
+
+
+SELECTOR_PROGRESS_PREFIX = "Keyframe scan:"
+
+
+def _run_selector_process(cmd: list[str], cwd: Path, env: dict) -> subprocess.CompletedProcess[str]:
+    """Run the selector; echo its "Keyframe scan: N%" lines, keep the rest off memory.
+
+    Per-frame model logs on stderr can be large on long recordings: they go to a
+    temporary file that only supplies the error tail on failure. stdout carries
+    the one-line JSON result.
+    """
+    with (
+        tempfile.TemporaryFile(mode="w+b") as diagnostic_stream,
+        tempfile.TemporaryFile(mode="w+b") as stdout_stream,
+    ):
+        process = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=stdout_stream, stderr=subprocess.PIPE)
+        for raw in process.stderr:
+            diagnostic_stream.write(raw)
+            line = raw.decode("utf-8", errors="replace").strip()
+            if line.startswith(SELECTOR_PROGRESS_PREFIX):
+                print(line, flush=True)
+        returncode = process.wait()
+        stdout_stream.seek(0)
+        stdout = stdout_stream.read().decode("utf-8", errors="replace")
+        if returncode:
             diagnostic_stream.seek(0, os.SEEK_END)
             diagnostic_stream.seek(max(0, diagnostic_stream.tell() - 4096))
             details = diagnostic_stream.read().decode("utf-8", errors="replace").strip()
             if not details:
-                details = result.stdout.strip()
+                details = stdout.strip()
             raise RuntimeError(
-                f"Database image selector failed (exit {result.returncode}): "
-                f"{details[-3000:]}"
+                f"Database image selector failed (exit {returncode}): {details[-3000:]}"
             )
-    return result
+    return subprocess.CompletedProcess(cmd, returncode, stdout, None)
+
+
+def planned_route_line(
+    waypoints, speed_m_s: float, fps: int, duration_s: float | None = None, max_frames: int = 0
+) -> str:
+    """One parseable line with the route size, for progress monitors.
+
+    Without a scenario the flight time is the route length over the speed; the
+    autopilot cuts the corners, so recordings come out 2-7 % shorter.
+    """
+    route_m = sum(
+        math.dist((a.x, a.y), (b.x, b.y)) for a, b in itertools.pairwise(waypoints)
+    )
+    flight_s = duration_s if duration_s is not None else route_m / max(speed_m_s, 1e-6)
+    frames = round(flight_s * fps)
+    if max_frames > 0:
+        frames = min(frames, max_frames)
+    return (
+        f"Planned route: {len(waypoints)} waypoints, {route_m / 1000:.1f} km, "
+        f"{flight_s:.0f} s of flight, ~{frames} video frames"
+    )
 
 
 def _database_selector_settings(root: Path, python: Path) -> dict:
@@ -238,6 +280,39 @@ def parse_args() -> SimulatorConfig:
         type=float,
         default=1000.0,
         help="Flight altitude (m)",
+    )
+    parser.add_argument(
+        "--altitude-reference",
+        dest="altitude_reference",
+        choices=["base", "msl"],
+        default="base",
+        help="Datum of --altitude and scenario altitudes: 'base' = above the "
+        "map's lowest DEM point (simulator Z=0, default); 'msl' = above sea "
+        "level from the DEM. Від чого рахується висота польоту",
+    )
+    parser.add_argument(
+        "--altitude-offset",
+        dest="altitude_offset_m",
+        type=float,
+        default=0.0,
+        help="Metres added to --altitude and every scenario altitude "
+        "(e.g. lift a survey over high terrain)",
+    )
+    parser.add_argument(
+        "--min-clearance",
+        dest="min_clearance_m",
+        type=float,
+        default=50.0,
+        help="Minimum camera height above the terrain under the drone when "
+        "recording: checked along the planned route before the flight and at "
+        "every frame (0 = off)",
+    )
+    parser.add_argument(
+        "--flat-spacing",
+        dest="flat_spacing",
+        action="store_true",
+        help="Survey line spacing from the flight height above Z=0 (old "
+        "behaviour) instead of the lowest height above the terrain",
     )
     parser.add_argument(
         "--speed",
@@ -578,6 +653,31 @@ def main():
     bounds = ortho_map.get_bounds_local()
     print(f"Map Bounds (local meters): {bounds}")
 
+    # Altitude datum. The simulator flies in heights above its Z=0 plane (the
+    # lowest DEM point); --altitude and scenario altitudes are converted once.
+    altitude_shift = altitude_shift_m(cfg.altitude_reference, cfg.altitude_offset_m, ortho_map)
+    flight_altitude = cfg.altitude_m + altitude_shift
+    if scenario is not None and altitude_shift:
+        scenario = scenario.with_altitude_offset(altitude_shift)
+    planned_heights = (
+        [k.value for k in scenario.altitude_m.keyframes] if scenario is not None else [flight_altitude]
+    )
+    base_elevation = float(ortho_map.base_elevation) if ortho_map.elevation is not None else None
+    if min(planned_heights) <= 0:
+        raise ValueError(
+            f"Flight altitude {min(planned_heights) - altitude_shift:.0f} m "
+            f"({cfg.altitude_reference}, offset {cfg.altitude_offset_m:+.0f} m) is at or below "
+            f"the lowest terrain of the map"
+            + (f" ({base_elevation:.0f} m above sea level)" if base_elevation is not None else "")
+        )
+    if base_elevation is not None:
+        print(
+            f"Altitude: '{cfg.altitude_reference}' reference, offset {cfg.altitude_offset_m:+.0f} m; "
+            f"Z=0 plane = lowest DEM point {base_elevation:.1f} m above sea level; "
+            f"flight {min(planned_heights) + base_elevation:.0f}-{max(planned_heights) + base_elevation:.0f} m "
+            f"above sea level"
+        )
+
     # 2. Camera setup
     camera = CameraModel.from_config(cfg.camera)
     renderer = CameraRenderer(camera, ortho_map, renderer=cfg.renderer)
@@ -585,13 +685,13 @@ def main():
 
     # 3. Physics setup
     # Start in the center of the map
-    initial_pos = [0.0, 0.0, cfg.altitude_m]
+    initial_pos = [0.0, 0.0, flight_altitude]
     flight_ctrl = FlightController(cfg.physics, initial_position=initial_pos)
 
     # 4. Control setup
     if cfg.mode in ("auto", "semi", "record"):
         print(f"Generating survey path for {cfg.mode} mode...")
-        max_alt = cfg.altitude_m
+        max_alt = flight_altitude
         max_pitch = 0.0
         max_roll = 0.0
         if scenario is not None:
@@ -606,17 +706,78 @@ def main():
             waypoints = scenario.route_waypoints(bounds, camera.footprint_meters)
             print(f"Scenario route: {len(waypoints)} waypoints.")
         else:
+            # Line spacing from the lowest camera height above the terrain, so
+            # the requested side overlap also holds over the highest ground.
+            relief_top = relief_top_above_base(ortho_map, bounds)
+            lowest_agl = flight_altitude - relief_top
+            if ortho_map.elevation is not None and lowest_agl < max(cfg.min_clearance_m, 1.0):
+                raise TerrainClearanceError(
+                    f"The survey covers terrain up to {relief_top:.0f} m above Z=0, which leaves "
+                    f"{lowest_agl:.0f} m under a {flight_altitude:.0f} m flight "
+                    f"(--min-clearance {cfg.min_clearance_m:.0f} m). Raise --altitude-offset by at "
+                    f"least {math.ceil(max(cfg.min_clearance_m, 1.0) - lowest_agl)} m."
+                )
+            spacing_altitude = flight_altitude if cfg.flat_spacing else lowest_agl
+            if relief_top > 0 and not cfg.flat_spacing:
+                print(
+                    f"Survey spacing from the lowest height above the terrain: "
+                    f"{spacing_altitude:.0f} m (relief up to {relief_top:.0f} m above Z=0)"
+                )
             waypoints = SurveyPlanner.generate_path(
                 bounds_local=bounds,
-                altitude_m=cfg.altitude_m,
+                altitude_m=flight_altitude,
                 camera=camera,
                 overlap_percent=cfg.overlap_percent,
                 grid_angle_deg=cfg.grid_angle_deg,
                 margin_altitude_m=max_alt,
                 max_pitch_deg=max_pitch,
                 max_roll_deg=max_roll,
+                spacing_altitude_m=spacing_altitude,
             )
             print(f"Generated {len(waypoints)} waypoints.")
+
+        if waypoints and cfg.mode in ("auto", "record"):
+            print(
+                planned_route_line(
+                    waypoints,
+                    cfg.speed_m_s,
+                    cfg.target_fps,
+                    duration_s=scenario.duration_s if scenario is not None else None,
+                    max_frames=cfg.max_frames,
+                )
+            )
+
+        # Predict the camera's height above the terrain along the route before
+        # rendering anything: a flight into the relief would only fail minutes later.
+        if waypoints and cfg.mode in ("auto", "record") and cfg.min_clearance_m > 0:
+            route = [(wp.x, wp.y) for wp in waypoints]
+            if scenario is not None:
+                duration = scenario.duration_s
+                altitude_at = scenario.altitude_m.value_at
+            else:
+                duration = sum(
+                    math.dist(a, b) for a, b in itertools.pairwise(route)
+                ) / max(cfg.speed_m_s, 1e-6)
+
+                def altitude_at(_t):
+                    return flight_altitude
+            report = predicted_route_clearance(
+                ortho_map, route, cfg.speed_m_s, altitude_at, duration
+            )
+            if report is not None:
+                if report.min_clearance_m < cfg.min_clearance_m:
+                    need = cfg.min_clearance_m - report.min_clearance_m
+                    raise TerrainClearanceError(
+                        f"Predicted camera height above the terrain {report.min_clearance_m:.0f} m "
+                        f"< --min-clearance {cfg.min_clearance_m:.0f} m at t={report.time_s:.0f} s "
+                        f"(x={report.x_m:.0f}, y={report.y_m:.0f} m; flight "
+                        f"{report.flight_height_m:.0f} m, terrain {report.terrain_height_m:.0f} m "
+                        f"above Z=0). Raise --altitude-offset by at least {math.ceil(need)} m."
+                    )
+                print(
+                    f"Predicted lowest camera height above the terrain: "
+                    f"{report.min_clearance_m:.0f} m at t={report.time_s:.0f} s"
+                )
 
         if cfg.mode in ("auto", "record"):
             hold_rad = (
@@ -717,6 +878,13 @@ def main():
                 "frame_gt_file": cfg.frame_gt_file,
                 "scenario": scenario.source_path if scenario is not None else None,
                 "keyframe_file": cfg.keyframe_file or None,
+                "vertical": {
+                    "altitude_reference": cfg.altitude_reference,
+                    "altitude_offset_m": cfg.altitude_offset_m,
+                    "base_elevation_m": base_elevation,
+                    "dem_raw_min_m": getattr(ortho_map, "elevation_raw_min", None),
+                    "dem_spikes_removed": int(getattr(ortho_map, "elevation_spikes_removed", 0)),
+                },
             },
         )
     else:
@@ -774,6 +942,11 @@ def main():
     # DatabaseBuilder у відеофайлі, і саме від нього рахуються слоти якорів
     video_frame_idx = 0
     run_status = "running"
+    clearance_failed = False
+    recording_dataset = bool(cfg.video_file or cfg.calib_file or cfg.frame_gt_file)
+    clearance_guard = (
+        recording_dataset and cfg.min_clearance_m > 0 and ortho_map.elevation is not None
+    )
 
     try:
         while not command_source.is_finished():
@@ -792,6 +965,16 @@ def main():
             # Frame n is sampled at exactly n/fps. Physics advances only after
             # that frame has been rendered and recorded.
             state = flight_ctrl.get_state()
+
+            if clearance_guard:
+                clearance = camera_clearance_m(ortho_map, state)
+                if clearance is not None and clearance < cfg.min_clearance_m:
+                    raise TerrainClearanceError(
+                        f"Camera {clearance:.0f} m above the terrain at frame {video_frame_idx} "
+                        f"(t={video_frame_idx / cfg.target_fps:.1f} s, x={state.position[0]:.0f}, "
+                        f"y={state.position[1]:.0f} m) < --min-clearance {cfg.min_clearance_m:.0f} m; "
+                        "the recording would show the relief from inside. Raise --altitude-offset."
+                    )
 
             # Log telemetry
             telemetry_logger.log(
@@ -911,6 +1094,12 @@ def main():
     except KeyboardInterrupt:
         run_status = "interrupted"
         print("\nInterrupted by user.")
+    except TerrainClearanceError:
+        # Nothing recorded so far is worth finalising: skip the (slow) image
+        # keyframe selection and calibration of a dataset that is invalid.
+        run_status = "failed"
+        clearance_failed = True
+        raise
     except Exception:
         run_status = "failed"
         raise
@@ -925,7 +1114,7 @@ def main():
             frame_gt_logger.close()
         if video_sink:
             video_sink.cleanup()
-        if calib_logger:
+        if calib_logger and not clearance_failed:
             try:
                 if selector_runtime is not None and selector_settings is not None:
                     if video_frame_idx <= 0:

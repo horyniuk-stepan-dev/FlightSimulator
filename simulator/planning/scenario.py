@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 from dataclasses import dataclass
@@ -37,6 +38,12 @@ class LinearProfile:
         if any(b.time_s <= a.time_s for a, b in zip(keyframes, keyframes[1:])):
             raise ValueError(f"Scenario profile '{name}' times must strictly increase")
         self.keyframes = keyframes
+
+    def shifted(self, delta: float) -> LinearProfile:
+        """The same profile with ``delta`` added to every value."""
+        out = LinearProfile.__new__(LinearProfile)
+        out.keyframes = [Keyframe(k.time_s, k.value + float(delta)) for k in self.keyframes]
+        return out
 
     def value_at(self, time_s: float) -> float | None:
         if not self.keyframes:
@@ -102,6 +109,10 @@ class FlightScenario:
         if min(k.value for k in result.altitude_m.keyframes) <= 0:
             raise ValueError("Scenario altitude_m must remain positive")
         return result
+
+    def with_altitude_offset(self, delta_m: float) -> FlightScenario:
+        """A copy whose altitude profile is shifted by ``delta_m`` (datum change)."""
+        return dataclasses.replace(self, altitude_m=self.altitude_m.shifted(delta_m))
 
     def max_tilt_deg(self) -> float:
         values = [abs(k.value) for p in (self.pitch_deg, self.roll_deg) for k in p.keyframes]

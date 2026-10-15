@@ -7,6 +7,100 @@ import numpy as np
 import rasterio
 from pyproj import Transformer
 
+# A DEM pixel is a spike (void/pit/peak artefact) when it differs from the median
+# of its 7x7 neighbourhood by more than this many metres, or by more than a 60°
+# slope across that neighbourhood on coarse rasters (see dem_spike_threshold_m).
+DEM_SPIKE_MIN_THRESHOLD_M = 100.0
+DEM_SPIKE_WINDOW_PX = 7
+
+
+def dem_spike_threshold_m(pixel_size_m: float | None) -> float:
+    """Height jump that real terrain cannot make within the median window.
+
+    Half the window is 3 pixels; a 60° slope over 3 pixels rises 5.2 pixel
+    sizes. Below ~19 m pixels the fixed 100 m floor dominates.
+    """
+    if pixel_size_m is None or not np.isfinite(pixel_size_m) or pixel_size_m <= 0:
+        return DEM_SPIKE_MIN_THRESHOLD_M
+    return max(DEM_SPIKE_MIN_THRESHOLD_M, 6.0 * float(pixel_size_m))
+
+
+def remove_elevation_spikes(
+    elevation: np.ndarray,
+    threshold_m: float = DEM_SPIKE_MIN_THRESHOLD_M,
+    window_px: int = DEM_SPIKE_WINDOW_PX,
+    max_passes: int = 3,
+) -> tuple[np.ndarray, int]:
+    """Replace isolated DEM spikes and pits by the median of their neighbourhood.
+
+    AWS Terrarium tiles carry void artefacts that decode to deep pits: 469
+    pixels down to -2405 m among 75-264 m terrain near Kaniv, 165 pixels down
+    to -987 m in the Kirovohrad steppe. The raster minimum is the simulator's
+    Z=0 plane, so one such pixel lifts the whole terrain by hundreds of metres
+    relative to the flight altitude — a 600 m flight then goes through the
+    ground. A pixel is a spike when it differs from the median of its
+    ``window_px`` x ``window_px`` neighbourhood by more than ``threshold_m``;
+    clusters up to 3 pixels thick are caught in one 7x7 pass, leftovers in
+    later passes. The median is evaluated only where the pixel already differs
+    from the box mean by half the threshold, which keeps a full-map pass well
+    under a second.
+
+    NaN (no coverage) stays NaN. Returns ``(cleaned float32 copy, pixels replaced)``.
+    """
+    from numpy.lib.stride_tricks import sliding_window_view
+
+    window = int(window_px) | 1
+    half = window // 2
+    cleaned = np.array(elevation, dtype=np.float32, copy=True)
+    replaced = np.zeros(cleaned.shape, dtype=bool)
+    for _ in range(max(1, int(max_passes))):
+        finite = np.isfinite(cleaned)
+        if not finite.any():
+            break
+        if finite.all():
+            dense = cleaned
+        else:
+            # Statistics must not see NaN: fill coverage gaps by the nearest height.
+            from scipy import ndimage
+
+            nearest = ndimage.distance_transform_edt(
+                ~finite, return_distances=False, return_indices=True
+            )
+            dense = cleaned[tuple(nearest)]
+        mean = cv2.blur(dense, (window, window), borderType=cv2.BORDER_REPLICATE)
+        rows, cols = np.nonzero(finite & (np.abs(cleaned - mean) > 0.5 * float(threshold_m)))
+        if rows.size == 0:
+            break
+        padded = np.pad(dense, half, mode="edge")
+        windows = sliding_window_view(padded, (window, window))[rows, cols]
+        median = np.median(windows.reshape(rows.size, -1), axis=1).astype(np.float32)
+        bad = np.abs(cleaned[rows, cols] - median) > float(threshold_m)
+        if not bad.any():
+            break
+        cleaned[rows[bad], cols[bad]] = median[bad]
+        replaced[rows[bad], cols[bad]] = True
+    return cleaned, int(replaced.sum())
+
+
+def _raster_pixel_size_m(dataset) -> float | None:
+    """Approximate ground size of one raster pixel in metres."""
+    try:
+        res = abs(float(dataset.transform.a))
+        crs = dataset.crs
+        bounds = dataset.bounds
+        if crs is None or res <= 0:
+            return None
+        if crs.is_geographic:
+            lat = 0.5 * (bounds.bottom + bounds.top)
+            return res * 111_320.0 * float(np.cos(np.radians(lat)))
+        if crs.to_epsg() == 3857:
+            y = 0.5 * (bounds.bottom + bounds.top)
+            lat = np.degrees(2.0 * np.arctan(np.exp(y / 6_378_137.0)) - np.pi / 2.0)
+            return res * float(np.cos(np.radians(lat)))
+        return res
+    except (AttributeError, TypeError, ValueError):
+        return None
+
 
 class OrthophotoMap:
     """
@@ -83,6 +177,10 @@ class OrthophotoMap:
 
         self.elevation = None
         self.base_elevation = 0.0
+        # Raw raster minimum before spike removal and the number of replaced
+        # pixels; reported so a recording can show what its Z=0 plane is.
+        self.elevation_raw_min = None
+        self.elevation_spikes_removed = 0
         self._elevation_transform = None
         self._elevation_inv_transform = None
         self._elevation_crs = None
@@ -124,7 +222,19 @@ class OrthophotoMap:
                 finite = self.elevation[np.isfinite(self.elevation)]
                 if finite.size == 0:
                     raise ValueError("Elevation raster contains no finite heights")
-                self.base_elevation = float(np.min(finite))
+                self.elevation_raw_min = float(np.min(finite))
+                self.elevation, self.elevation_spikes_removed = remove_elevation_spikes(
+                    self.elevation,
+                    threshold_m=dem_spike_threshold_m(_raster_pixel_size_m(src_elev)),
+                )
+                self.base_elevation = float(np.nanmin(self.elevation))
+                if self.elevation_spikes_removed:
+                    print(
+                        f"[OrthophotoMap] DEM: replaced {self.elevation_spikes_removed} "
+                        f"spike/pit pixel(s) by neighbouring heights "
+                        f"(raw min {self.elevation_raw_min:.1f} m -> "
+                        f"Z=0 plane {self.base_elevation:.1f} m)"
+                    )
 
         print(f"[OrthophotoMap] Loaded: {self.image.shape[1]}x{self.image.shape[0]} px, "
               f"resolution: {self.local_res_x:.3f} ground-m/px "
