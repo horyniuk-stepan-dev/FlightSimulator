@@ -1,0 +1,290 @@
+{
+ "version": 1,
+ "name": "bochkivtsi_relief_alt_heading",
+ "description": "Query flight for the bochkivtsi_relief reference layers (500/1000/2000 m, base datum, heading-hold 0, north-up): altitude AND heading change in one video. No yaw profile, so the camera yaw follows the course (heading-follow); no pitch/roll profiles, so the camera stays nadir and only scale and rotation vary. Phases separate altitude-only, heading-only and simultaneous changes; it covers a full 360 deg orbit at 1000 m, one abrupt 90 deg corner at 500 m and a dip below the lowest layer. Altitudes are above the base plane (lowest DEM point), like the reference layers. Record with --zoom 18 --speed 50 --altitude-reference base and WITHOUT --heading-hold-deg. Phase times are approximate (kinematic estimate of the autopilot at 50 m/s).",
+ "duration_s": 300.0,
+ "phases": [
+  {
+   "from_s": 0,
+   "to_s": 10,
+   "label": "acquire_1000",
+   "note": "cold start on the 1000 m layer (main), heading 60 deg, nadir"
+  },
+  {
+   "from_s": 10,
+   "to_s": 58,
+   "label": "climb_1000_2000_straight",
+   "note": "altitude only: straight leg at 60 deg; handoff main -> 2 at 1414 m (t~30)"
+  },
+  {
+   "from_s": 58,
+   "to_s": 76,
+   "label": "turn_at_2000",
+   "note": "heading only: right turn 60 -> 150 deg at the exact scale of layer 2"
+  },
+  {
+   "from_s": 76,
+   "to_s": 106,
+   "label": "descend_while_turning",
+   "note": "both: 2000 -> 1000 m descent during a left turn 150 -> 30 deg (t~82-106); handoff 2 -> main at 1414 m (t~103)"
+  },
+  {
+   "from_s": 106,
+   "to_s": 122,
+   "label": "descend_straight",
+   "note": "altitude only: end of the descent on heading 30 deg"
+  },
+  {
+   "from_s": 122,
+   "to_s": 184,
+   "label": "orbit_1000",
+   "note": "heading only: full 360 deg right orbit at 1000 m (t~124-170, every heading at the exact main-layer scale, ~30 deg steps), then right turn 30 -> 100 deg"
+  },
+  {
+   "from_s": 184,
+   "to_s": 208,
+   "label": "descend_1000_500_straight",
+   "note": "altitude only: heading ~98 deg; handoff main -> 3 at 707 m (t~198)"
+  },
+  {
+   "from_s": 208,
+   "to_s": 232,
+   "label": "low_corner_dip",
+   "note": "500 m: abrupt 90 deg corner (98 -> 183 deg within one GT slot, t~214), then a dip to 450 m below the lowest layer (t 216-228)"
+  },
+  {
+   "from_s": 232,
+   "to_s": 265,
+   "label": "climb_while_uturn",
+   "note": "both: 500 -> 1000 m climb (232-262) during a left U-turn 183 -> 25 deg (t~233-265); handoff 3 -> main at 707 m (t~244)"
+  },
+  {
+   "from_s": 265,
+   "to_s": 300,
+   "label": "cruise_1000",
+   "note": "1000 m, heading 25 deg; the route is longer than the flight so the drone never stops and hovers"
+  }
+ ],
+ "route": [
+  {
+   "x_m": -4800,
+   "y_m": -1300
+  },
+  {
+   "x_m": -2115.3,
+   "y_m": 250.0
+  },
+  {
+   "x_m": -1893.6,
+   "y_m": 325.3
+  },
+  {
+   "x_m": -1660.0,
+   "y_m": 309.9
+  },
+  {
+   "x_m": -1450.1,
+   "y_m": 206.4
+  },
+  {
+   "x_m": -1295.7,
+   "y_m": 30.4
+  },
+  {
+   "x_m": -1170.7,
+   "y_m": -186.1
+  },
+  {
+   "x_m": -1036.8,
+   "y_m": -345.7
+  },
+  {
+   "x_m": -856.3,
+   "y_m": -449.9
+  },
+  {
+   "x_m": -651.1,
+   "y_m": -486.1
+  },
+  {
+   "x_m": -445.9,
+   "y_m": -449.9
+  },
+  {
+   "x_m": -265.4,
+   "y_m": -345.7
+  },
+  {
+   "x_m": -131.5,
+   "y_m": -186.1
+  },
+  {
+   "x_m": 318.5,
+   "y_m": 593.3
+  },
+  {
+   "x_m": 472.3,
+   "y_m": 747.0
+  },
+  {
+   "x_m": 682.3,
+   "y_m": 803.3
+  },
+  {
+   "x_m": 892.3,
+   "y_m": 747.0
+  },
+  {
+   "x_m": 1046.0,
+   "y_m": 593.3
+  },
+  {
+   "x_m": 1102.3,
+   "y_m": 383.3
+  },
+  {
+   "x_m": 1046.0,
+   "y_m": 173.3
+  },
+  {
+   "x_m": 892.3,
+   "y_m": 19.6
+  },
+  {
+   "x_m": 682.3,
+   "y_m": -36.7
+  },
+  {
+   "x_m": 472.3,
+   "y_m": 19.6
+  },
+  {
+   "x_m": 318.5,
+   "y_m": 173.3
+  },
+  {
+   "x_m": 262.3,
+   "y_m": 383.3
+  },
+  {
+   "x_m": 318.5,
+   "y_m": 593.3
+  },
+  {
+   "x_m": 432.8,
+   "y_m": 735.7
+  },
+  {
+   "x_m": 584.6,
+   "y_m": 837.1
+  },
+  {
+   "x_m": 759.8,
+   "y_m": 888.2
+  },
+  {
+   "x_m": 942.3,
+   "y_m": 884.2
+  },
+  {
+   "x_m": 2419.5,
+   "y_m": 623.7
+  },
+  {
+   "x_m": 2228.5,
+   "y_m": -459.6
+  },
+  {
+   "x_m": 2229.7,
+   "y_m": -674.4
+  },
+  {
+   "x_m": 2306.5,
+   "y_m": -875.0
+  },
+  {
+   "x_m": 2449.0,
+   "y_m": -1035.8
+  },
+  {
+   "x_m": 2639.0,
+   "y_m": -1136.0
+  },
+  {
+   "x_m": 2852.1,
+   "y_m": -1162.9
+  },
+  {
+   "x_m": 3061.1,
+   "y_m": -1113.0
+  },
+  {
+   "x_m": 3239.0,
+   "y_m": -992.6
+  },
+  {
+   "x_m": 3363.2,
+   "y_m": -817.3
+  },
+  {
+   "x_m": 4335.2,
+   "y_m": 1267.2
+  }
+ ],
+ "profiles": {
+  "altitude_m": [
+   {
+    "time_s": 0.0,
+    "value": 1000.0
+   },
+   {
+    "time_s": 10.0,
+    "value": 1000.0
+   },
+   {
+    "time_s": 58.0,
+    "value": 2000.0
+   },
+   {
+    "time_s": 76.0,
+    "value": 2000.0
+   },
+   {
+    "time_s": 122.0,
+    "value": 1000.0
+   },
+   {
+    "time_s": 184.0,
+    "value": 1000.0
+   },
+   {
+    "time_s": 208.0,
+    "value": 500.0
+   },
+   {
+    "time_s": 216.0,
+    "value": 500.0
+   },
+   {
+    "time_s": 222.0,
+    "value": 450.0
+   },
+   {
+    "time_s": 228.0,
+    "value": 500.0
+   },
+   {
+    "time_s": 232.0,
+    "value": 500.0
+   },
+   {
+    "time_s": 262.0,
+    "value": 1000.0
+   },
+   {
+    "time_s": 300.0,
+    "value": 1000.0
+   }
+  ]
+ }
+}

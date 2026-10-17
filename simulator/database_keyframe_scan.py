@@ -69,13 +69,25 @@ class _NullWriter:
 
 
 class _LocalOnlyAdapter:
-    """Skip DINO descriptors, which do not participate in keyframe decisions."""
+    """Skip DINO descriptors, which do not participate in keyframe decisions.
+
+    FrameProcessor (DroneLocalization 4f9937a and later) extracts local features
+    for every frame and the global descriptor only for saved frames; older
+    versions called ``extract_features`` once per frame. Both are served, and
+    the global descriptor is ``None``: ``_NullWriter`` discards the rows.
+    """
 
     def __init__(self, extractor):
         self.extractor = extractor
 
-    def extract_features(self, image: np.ndarray, mask: np.ndarray) -> dict:
+    def extract_local_features(self, image: np.ndarray, mask: np.ndarray) -> dict:
         return self.extractor.extract_local_features(image, mask)
+
+    def extract_features(self, image: np.ndarray, mask: np.ndarray) -> dict:
+        return self.extract_local_features(image, mask)
+
+    def extract_global_descriptor(self, image: np.ndarray) -> None:
+        return None
 
 
 @dataclass(frozen=True)
