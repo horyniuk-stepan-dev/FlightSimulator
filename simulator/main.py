@@ -18,6 +18,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# Allow running this file directly (python simulator/main.py)
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from simulator.config import SimulatorConfig
 from simulator.terrain.orthophoto_map import OrthophotoMap
 from simulator.camera.camera_model import CameraModel
@@ -1053,7 +1058,18 @@ def main():
             # open. Skipping cv2.waitKey(1) in headless mode removes a ~1 ms/frame
             # stall, which is a big part of what lets processing run at full speed.
             if sinks:
+                # Drain the whole HighGUI message queue. A single waitKey(1)
+                # returns on the first WM_KEYDOWN, and held keys (auto-repeat)
+                # / mouse drags keep the queue non-empty, so Windows never
+                # dispatches the low-priority WM_PAINT -> the preview freezes
+                # even though the loop runs at full FPS.
                 key = cv2.waitKey(1) & 0xFF
+                for _ in range(64):
+                    k = cv2.pollKey()
+                    if k == -1:
+                        break
+                    if (k & 0xFF) == 27:
+                        key = 27
                 _t3 = time.perf_counter()
                 if video_frame_idx % 10 == 0:
                     _keys = sorted(getattr(command_source, "_keys_pressed", set()))
