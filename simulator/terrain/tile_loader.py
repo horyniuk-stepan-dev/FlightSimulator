@@ -89,7 +89,21 @@ def _download_raster(
     original_fetch_tile = getattr(cx.tile, '_fetch_tile', None)
     if original_fetch_tile:
         def patched_fetch_tile(*args, **kwargs):
-            res = original_fetch_tile(*args, **kwargs)
+            # contextily retries only HTTP error codes; a dropped connection
+            # (RemoteDisconnected / reset / timeout) used to abort the whole
+            # download. Retry those with backoff instead.
+            import time as _time
+
+            import requests as _requests
+
+            for attempt in range(6):
+                try:
+                    res = original_fetch_tile(*args, **kwargs)
+                    break
+                except (_requests.ConnectionError, _requests.Timeout):
+                    if attempt == 5:
+                        raise
+                    _time.sleep(min(2.0 * 2**attempt, 30.0))
             tracker.downloaded += 1
             return res
         cx.tile._fetch_tile = patched_fetch_tile
